@@ -308,6 +308,13 @@ function click(event, d) {
         d._children = null;
     }
     update(d);
+    // Refresh minimap to reflect collapse/expand state if using rootData layout.
+    // Since initMinimap uses raw data, it might not reflect collapse state unless we pass layout hierarchy.
+    // However, for consistency with the requested feature (expansion), we ensure it's called.
+    // Note: initMinimap currently builds off raw 'data', so standard collapse/expand (which just hides children in d3) 
+    // might not be reflected in minimap unless we change initMinimap to use d3.hierarchy state or similar.
+    // But the user specifically asked about "expanding a subtree" which adds new data.
+    if (rootData) updateMinimap(rootData);
 }
 
 function expandSubTree(d) {
@@ -326,8 +333,8 @@ function expandSubTree(d) {
     // Create hierarchy for new data
     const newNodes = d3.hierarchy(subTreeData);
     newNodes.parent = d;
-    newNodes.depth = d.depth + 1;
-    newNodes.height = 0; // Will be recalculated by d3?
+    // newNodes.depth and height are handled in the loop below
+
 
     // Fix depths of all descendants
     newNodes.descendants().forEach(desc => {
@@ -340,6 +347,35 @@ function expandSubTree(d) {
     d.data.children = [subTreeData]; // Keep data consistent
 
     update(d);
+    updateMinimap(rootData);
+}
+
+function updateMinimap(data) {
+    // Re-initialize minimap with current data structure
+    document.getElementById('minimap').innerHTML = '';
+
+    // We need to clone the current layout hierarchy to respect 'collapsed' state.
+    // D3's 'hierarchy' from raw data doesn't know about collapsed nodes (stored in _children).
+    // So we manually rebuild a hierarchy based on the VISIBLE children of the current rootData.
+    const visibleData = copyVisibleHierarchy(rootData);
+    initMinimap(visibleData);
+}
+
+function copyVisibleHierarchy(source) {
+    // Determine children: if 'children' is null/undefined, it's a leaf OR collapsed.
+    // If 'children' exists, it's expanded.
+    // We create a simple object structure that d3.hierarchy can consume.
+    const node = {
+        name: source.data.name,
+        id: source.data.id || source.id,
+        children: []
+    };
+
+    if (source.children) {
+        node.children = source.children.map(child => copyVisibleHierarchy(child));
+    }
+
+    return node;
 }
 
 // Helper icons
