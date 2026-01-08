@@ -1,0 +1,14 @@
+<root main_tree_to_execute="MainTree">
+    <BehaviorTree ID="MainTree">
+        <Fallback name="root_fallback">
+            <Sequence name="search_and_pickup">
+                <Fallback>
+                   <Condition ID="IsObjectVisible"/>
+                   <Action ID="SearchObject"/>
+                </Fallback>
+                <Action ID="PickupObject"/>
+            </Sequence>
+            <Action ID="AskForHelp"/>
+        </Fallback>
+    </BehaviorTree>
+</root>
