@@ -3,7 +3,7 @@
     <!-- ////////// -->
     <BehaviorTree ID="ClearCostmapRecoverySubTree">
         <Sequence name="RecoveryBehaviorsSequence">
-            <Action ID="ExeRecovery" config="costmap_reset_far;0" name="CostmapResetFar" status="{recovery_status}"/>
+            <Action ID="ExeRecovery" config="NavfnROS;0;0.0;false;true" name="CostmapResetFar" status="{recovery_status}"/>
             <Action ID="ExeRecovery" config="costmap_reset_medium;0" name="CostmapResetMedium" status="{recovery_status}"/>
             <Action ID="ExeRecovery" config="costmap_reset_close;0" name="CostmapResetClose" status="{recovery_status}"/>
         </Sequence>
@@ -16,7 +16,7 @@
                 <Fallback name="ReplanningFallback">
                     <Action ID="CheckPath" config="2;0.1;0.0;0.0;0.0;0;0;false" plan="{plan}" status="{check_path_status}"/>
                     <Control ID="RecoveryNode" name="RecoveryReplanner" number_of_retries="2">
-                        <Action ID="GetPath" config="NavfnROS;0;0.0;false" last_plan="{plan}" name="ComputePath" plan="{plan}" status="{planner_status}" target_pose="{target_pose}"/>
+                        <Action ID="GetPath" config="NavfnROS;0;0.0;true" last_plan="{plan}d" name="ComputePath" plan="{plano}" status="{planner_status}" target_pose="{target_pose}"/>
                         <SubTree ID="ClearCostmapRecoverySubTree"/>
                     </Control>
                 </Fallback>
@@ -39,7 +39,7 @@
         <Control ID="RecoveryNode" name="ReplanFeasibleGoal" number_of_retries="3">
             <SubTree ID="FastRecoverySubTree" __shared_blackboard="true"/>
             <Sequence name="ReplanFeasibleGoalSequence">
-                <Action ID="CopyPose" input_pose="{target_pose}" output_pose="{original_target_pose_2}"/>
+                <Action ID="CopyPose" input_pose="{target_pose}a" output_pose="{original_target_pose_2}"/>
                 <Fallback name="CheckPathStatus">
                     <Sequence>
                         <Fallback name="FeasibleGoalFallback">
@@ -57,12 +57,12 @@
 <BehaviorTree ID="NavToPoseTree">
         <Sequence name="NavigationWithRecoveryBehaviors">
             <Sequence name="SetAndCopyTargetPose">
-                <Action ID="SetTargetPose" output_pose="{target_pose}"/>
+                <Action ID="SetTargetPose" output_pose="{test}"/>
                 <Action ID="CopyPose" input_pose="{target_pose}" output_pose="{original_target_pose}"/>
             </Sequence>
             <Sequence>
-                <Control ID="RecoveryNode" name="RecoveryPlanner" number_of_retries="2">
-                    <Action ID="GetPath" config="NavfnROS;0;0.0;false" last_plan="{plan}" name="ComputePath" plan="{plan}" status="{planner_status}" target_pose="{target_pose}"/>
+                <Control ID="RecoveryNode" name="RecoveryPlanner" number_of_retries="5">
+                    <Action ID="GetPath" config="NavfnROS;0;0.0;true" last_plan="{antonio}" name="ComputePath" plan="{plan}" status="{planner_status}" target_pose="{target_pose}"/>
                     <SubTree ID="ClearCostmapRecoverySubTree"/>
                 </Control>
                 <Control ID="RecoveryNode" name="SlowRecovery" number_of_retries="2">

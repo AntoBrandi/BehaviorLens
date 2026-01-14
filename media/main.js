@@ -2,6 +2,7 @@ const vscode = acquireVsCodeApi();
 
 // --- State ---
 let isVertical = true;
+let showPorts = false;
 let rootData = null;
 let treeDefinitions = {};
 let svg, g, minimapSvg, minimapG;
@@ -32,19 +33,25 @@ document.getElementById('btn-layout').addEventListener('click', () => {
 
 document.getElementById('btn-fit').addEventListener('click', fitView);
 
+document.getElementById('btn-ports').addEventListener('click', () => {
+    showPorts = !showPorts;
+    document.getElementById('btn-ports').innerText = showPorts ? "Hide Ports" : "Show Ports";
+    if (rootData) {
+        update(rootData);
+    }
+});
+
 // --- Functions ---
 
 function updateContent(text) {
     const container = document.getElementById('tree-container');
-    container.innerHTML = '';
-    document.getElementById('minimap').innerHTML = ''; // Clear minimap
 
-    // Parse XML
+    // Parse XML first
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(text, "text/xml");
     const errorNode = xmlDoc.querySelector('parsererror');
     if (errorNode) {
-        container.innerText = "Error parsing XML: " + errorNode.textContent;
+        container.innerHTML = "Error parsing XML: " + errorNode.textContent;
         return;
     }
 
@@ -79,9 +86,6 @@ function updateContent(text) {
         return;
     }
 
-    const data = parseXmlNode(rootXml);
-    if (!data) return;
-
     // --- Index all BehaviorTrees ---
     treeDefinitions = {};
     const trees = xmlDoc.querySelectorAll('BehaviorTree');
@@ -92,7 +96,83 @@ function updateContent(text) {
         }
     });
 
-    initTree(data, container);
+    // --- Compute Global Indices for Uniqueness ---
+    const allElements = xmlDoc.querySelectorAll('*');
+    const counts = {}; // key -> count
+
+    allElements.forEach(el => {
+        const key = el.getAttribute('name') || el.getAttribute('ID');
+        if (key) {
+            if (counts[key] === undefined) counts[key] = 0;
+            el._occurrenceIndex = counts[key]; // Attach directly to DOM node
+            counts[key]++;
+        } else {
+            el._occurrenceIndex = 0;
+        }
+    });
+
+    const data = parseXmlNode(rootXml);
+    if (!data) return;
+
+    if (!rootData) {
+        // Initial Load
+        container.innerHTML = ''; // Start clean
+        initTree(data, container);
+    } else {
+        // Soft Update
+        const newRoot = d3.hierarchy(data);
+        newRoot.x0 = rootData.x0; // inherit root pos
+        newRoot.y0 = rootData.y0;
+
+        syncState(rootData, newRoot);
+
+        rootData = newRoot;
+        update(rootData);
+        // Minimap update
+        document.getElementById('minimap').innerHTML = '';
+        initMinimap(data);
+    }
+}
+
+function syncState(oldNode, newNode) {
+    // 1. Copy D3 internal State (Essential for smooth transitions)
+    if (oldNode.x !== undefined) newNode.x0 = oldNode.x;
+    if (oldNode.y !== undefined) newNode.y0 = oldNode.y;
+    // Copy the internal D3 ID to ensure 'update' transition instead of 'enter'
+    if (oldNode.id !== undefined) newNode.id = oldNode.id;
+
+    // 2. Preserve Collapse State
+    if (oldNode._children && !oldNode.children) {
+        // Old node was collapsed.
+        if (newNode.children) {
+            newNode._children = newNode.children;
+            newNode.children = null;
+        }
+    }
+
+    // 3. Recurse to children
+    const oldCh = oldNode.children || oldNode._children || [];
+    const newCh = newNode.children || newNode._children || []; // newNode starts expanded (children is set)
+
+    // We assume structure is mostly preserved during attribute edits.
+    // Matching by index is often safer than IDs for non-unique or missing IDs (like Sequence nodes)
+    // especially since 'updateContent' is called on text edit which usually preserves order.
+
+    // To be more robust: Match by ID if BOTH have ID. Else match by index.
+    // But since we have the "non-unique ID" issue, Index might effectively be better for this tree structure.
+
+    const maxLen = Math.min(oldCh.length, newCh.length);
+    for (let i = 0; i < maxLen; i++) {
+        const oldC = oldCh[i];
+        const newC = newCh[i];
+
+        // Simple heuristic: if tag names match, assume same node.
+        if (oldC.data.name === newC.data.name) {
+            syncState(oldC, newC);
+        }
+        // If they assume different structure (e.g. deletion), we stop syncing this branch 
+        // and let D3 handle exit/enter for the mismatch.
+    }
 }
 
 function parseXmlNode(xmlNode) {
@@ -100,7 +180,8 @@ function parseXmlNode(xmlNode) {
 
     const node = {
         name: xmlNode.tagName,
-        id: xmlNode.getAttribute('ID') || xmlNode.getAttribute('name') || '',
+        id: xmlNode.getAttribute('name') || xmlNode.getAttribute('ID') || '',
+        occurrenceIndex: xmlNode._occurrenceIndex !== undefined ? xmlNode._occurrenceIndex : 0,
         attributes: {},
         children: []
     };
@@ -124,10 +205,16 @@ function initTree(data, container) {
     height = container.clientHeight;
 
     // Zoom behavior
-    zoomListener = d3.zoom().scaleExtent([0.1, 4]).on("zoom", (event) => {
-        g.attr("transform", event.transform);
-        updateMinimapRect(event.transform);
-    });
+    zoomListener = d3.zoom()
+        .scaleExtent([0.1, 4])
+        .filter(function (event) {
+            // Check if valid target for zoom (ignore inputs)
+            return !event.target.tagName.match(/^input|textarea|select|option/i) && !event.button;
+        })
+        .on("zoom", (event) => {
+            g.attr("transform", event.transform);
+            updateMinimapRect(event.transform);
+        });
 
     svg = d3.select(container).append("svg")
         .attr("width", "100%")
@@ -152,11 +239,55 @@ function initTree(data, container) {
 
 function update(source) {
     // Layout config
-    const nodeW = 140;
-    const nodeH = 60;
+    // Layout config
+    const baseNodeH = 60;
+    const baseNodeW = 140;
+
+    // --- Pre-calculate dimensions ---
+    // We want the tree to be responsive to the content.
+    // Calculate max width needed for ports across all visible nodes to set a standard width, 
+    // OR calculate per-node width. D3 Tree loves fixed or uniform-ish sizing for collision.
+    // Let's find the max width required by any node currently visible.
+
+    let maxTextW = baseNodeW;
+    let maxPortsCount = 0;
+
+    rootData.descendants().forEach(d => {
+        // Name width (approx)
+        const nameLen = (d.data.name || "").length * 9;
+        const idLen = (d.data.id || "").length * 7;
+        let w = Math.max(nameLen, idLen, baseNodeW);
+
+        // Ports width
+        if (showPorts && d.data.attributes) {
+            let pCount = 0;
+            // Inputs take space, let's assume a min width for good UX
+            const minPortW = 180;
+            if (Object.keys(d.data.attributes).length > 2) w = Math.max(w, minPortW);
+
+            for (const [key, value] of Object.entries(d.data.attributes)) {
+                if (key === 'ID' || key === 'name') continue;
+                // Calculate rough width: Label + Input
+                const labelLen = key.length * 7;
+                const valueLen = value.length * 7;
+                // We want input to be editable, so give it some room
+                const rowWidth = labelLen + Math.max(valueLen, 50) + 40;
+                w = Math.max(w, rowWidth);
+                pCount++;
+            }
+            maxPortsCount = Math.max(maxPortsCount, pCount);
+        }
+
+        maxTextW = Math.max(maxTextW, w);
+    });
+
+    const nodeW = maxTextW;
+    // Max Height needed
+    const portRowHeight = 22; // Slightly taller for input
+    const maxNodeH = showPorts ? baseNodeH + (maxPortsCount * portRowHeight) + 10 : baseNodeH;
 
     // Switch sizes based on layout
-    const treeMap = d3.tree().nodeSize(isVertical ? [nodeW + 20, nodeH + 80] : [nodeH + 40, nodeW + 100]);
+    const treeMap = d3.tree().nodeSize(isVertical ? [nodeW + 40, maxNodeH + 60] : [maxNodeH + 40, nodeW + 100]);
     const treeData = treeMap(rootData);
 
     const nodes = treeData.descendants();
@@ -182,9 +313,11 @@ function update(source) {
     // Node Rect
     nodeEnter.append('rect')
         .attr('width', nodeW)
-        .attr('height', nodeH)
+        // Height will be updated in merge, start small
+        .attr('height', baseNodeH)
         .attr('x', -nodeW / 2)
-        .attr('y', -nodeH / 2)
+        .attr('y', -30) // Fixed top centering relative to link
+
         .style('opacity', 0); // Fade in
 
     // Icons
@@ -215,6 +348,12 @@ function update(source) {
         .text(d => d.data.id ? d.data.id : "")
         .style("fill-opacity", 0);
 
+    // Ports (Initial)
+    nodeEnter.each(function (d) {
+        if (!showPorts) return;
+        renderPorts(d3.select(this), d, nodeW);
+    });
+
 
     // Update Position
     const nodeUpdate = nodeEnter.merge(node);
@@ -225,12 +364,38 @@ function update(source) {
             else return `translate(${d.y},${d.x})`;
         });
 
-    nodeUpdate.select('rect')
+    nodeUpdate.select('rect').transition().duration(duration)
+        .attr('width', nodeW) // Update width on transition
+        .attr('x', -nodeW / 2) // Update x centering
+        .attr('height', d => {
+            if (!showPorts) return baseNodeH;
+            let count = 0;
+            if (d.data.attributes) {
+                for (const k in d.data.attributes) {
+                    if (k !== 'ID' && k !== 'name') count++;
+                }
+            }
+            return count > 0 ? baseNodeH + (count * 22) + 10 : baseNodeH;
+        })
+        .attr('y', d => {
+            return -30; // Keep fixed top relative to link connection
+        })
         .style('stroke', d => d._children ? "#ff79c6" : null) // Highlight collapsed
         .style('opacity', 1);
 
     nodeUpdate.select('text').style("fill-opacity", 1);
     nodeUpdate.selectAll('text').style("fill-opacity", 1);
+
+    // Update ports visibility
+    // nodeUpdate.selectAll('.node-port').style("fill-opacity", showPorts ? 1 : 0); // Removed as foreignObject is used
+
+    nodeUpdate.selectAll('.node-port-fo').remove();
+
+    // Re-append ports
+    nodeUpdate.each(function (d) {
+        if (!showPorts) return;
+        renderPorts(d3.select(this), d, nodeW);
+    });
 
 
     // Exit
@@ -276,6 +441,66 @@ function update(source) {
         d.y0 = d.y;
     });
 }
+
+function renderPorts(el, d, nodeW) {
+    const params = d.data.attributes;
+    let count = 0;
+    const itemHeight = 22;
+    // Start y below text
+    const startY = 30;
+
+    for (const [key, value] of Object.entries(params)) {
+        if (key === 'ID' || key === 'name') continue;
+
+        const fo = el.append("foreignObject")
+            .attr("class", "node-port-fo")
+            .attr("x", -nodeW / 2 + 10)
+            .attr("y", startY + (count * itemHeight))
+            .attr("width", nodeW - 20)
+            .attr("height", 20); // slightly less than row height
+
+        const div = fo.append("xhtml:div")
+            .attr("class", "port-container");
+
+        div.append("span")
+            .attr("class", "port-label")
+            .text(key + ": ");
+
+        const input = div.append("input")
+            .attr("class", "port-input")
+            .attr("value", value)
+            .on("change", function (event) {
+                // Post message
+                // We need to stop propagation to prevent zoom logic from messing up??
+                // Actually D3 zoom is on SVG, input events usually bubble.
+                // But we want to handle the change.
+                const newValue = this.value; // 'this' is input
+                vscode.postMessage({
+                    type: 'editAttribute',
+                    nodeId: d.data.id,
+                    occurrenceIndex: d.data.occurrenceIndex,
+                    attr: key,
+                    value: newValue
+                });
+            })
+            .on("dblclick", (e) => e.stopPropagation()) // Prevent header-like double click behavior
+            .on("mousedown", (e) => e.stopPropagation()) // Allow text selection without dragging map
+            // Stop key propagation to prevent VS Code / D3 interference
+            .on("keydown", function (e) {
+                if (e.key === 'Enter') {
+                    this.blur(); // Commit change
+                }
+                e.stopPropagation();
+            })
+            .on("keypress", (e) => e.stopPropagation())
+            .on("keyup", (e) => e.stopPropagation())
+            .on("click", (e) => e.stopPropagation());
+
+        count++;
+    }
+}
+
+
 
 // Custom diagonal generator
 function diagonal(s, d) {
@@ -328,7 +553,24 @@ function expandSubTree(d) {
     const subTreeRootXml = treeDefinitions[subTreeId].querySelector(':scope > *'); // First child of <BehaviorTree> (e.g. Sequence)
     if (!subTreeRootXml) return;
 
-    const subTreeData = parseXmlNode(subTreeRootXml);
+    // We need indices for the subtree too? 
+    // The subtree nodes are part of the main doc, so they were indexed in the initial pass?
+    // YES, querySelectorAll('*') covered them.
+    // BUT we need access to that indexMap here. 
+    // `treeDefinitions` holds raw XML nodes. We can re-calculate or better, attach index to xmlNode directly in the first pass?
+    // JS Objects are extensible.
+
+    // Quick fix: re-calculate or just attach `_index` property to DOM nodes in the initial pass.
+    // Let's modify the initial pass to attach `_occurrenceIndex` to the Element object itself.
+    // Wait, modify `parseXmlNode` to read from property if map missing?
+
+    // Actually, `parseXmlNode` relies on `indexMap`. We don't have it here.
+    // Let's rely on attached property.
+
+    const subTreeData = parseXmlNode(subTreeRootXml); // Will fail to get index if map missing.
+
+    // REVISIT: For now, SubTree expansion might lose edit capability if we don't fix this.
+    // Let's attach to XML node.
 
     // Create hierarchy for new data
     const newNodes = d3.hierarchy(subTreeData);
