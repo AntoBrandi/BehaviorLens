@@ -514,6 +514,7 @@ function onUpdateAttribute(payload: any) {
             v-model:nodes="nodes" 
             v-model:edges="edges" 
             :fit-view-on-init="true"
+            :delete-key-code="['Backspace', 'Delete']"
             @connect="onConnect" 
             @node-drag-stop="handleNodeDragStop"
             @nodes-change="onNodesChange"
