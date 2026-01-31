@@ -73,9 +73,7 @@ class BehaviorTreePreviewManager {
         panel.webview.onDidReceiveMessage(message => {
             switch (message.type) {
                 case 'editAttribute':
-                    vscode.workspace.openTextDocument(uri).then(doc => {
-                        this.handleAttributeEdit(doc, message.nodeId, message.occurrenceIndex, message.attr, message.value);
-                    });
+                    this.handleEditAttribute(uri, message.nodeId, message.attr, message.value);
                     break;
                 case 'reparent_node':
                     this.handleMoveNode(uri, message.sourceId, message.targetId);
@@ -157,7 +155,7 @@ class BehaviorTreePreviewManager {
             // Force update
             const panel = this._previews.get(uri.toString());
             if (panel) {
-                vscode.workspace.openTextDocument(uri).then(doc => this.updateWebview(panel, doc));
+                this.updateWebviewWithContent(panel, this.formatXml(doc), path.dirname(filePath));
             }
         }
     }
@@ -178,7 +176,7 @@ class BehaviorTreePreviewManager {
             // Force update
             const panel = this._previews.get(uri.toString());
             if (panel) {
-                vscode.workspace.openTextDocument(uri).then(doc => this.updateWebview(panel, doc));
+                this.updateWebviewWithContent(panel, this.formatXml(doc), path.dirname(filePath));
             }
         }
     }
@@ -211,7 +209,7 @@ class BehaviorTreePreviewManager {
             // Force update
             const panel = this._previews.get(uri.toString());
             if (panel) {
-                vscode.workspace.openTextDocument(uri).then(doc => this.updateWebview(panel, doc));
+                this.updateWebviewWithContent(panel, this.formatXml(doc), path.dirname(filePath));
             }
         }
         else {
@@ -249,7 +247,7 @@ class BehaviorTreePreviewManager {
             // Force update
             const panel = this._previews.get(uri.toString());
             if (panel) {
-                vscode.workspace.openTextDocument(uri).then(doc => this.updateWebview(panel, doc));
+                this.updateWebviewWithContent(panel, this.formatXml(doc), path.dirname(filePath));
             }
         }
     }
@@ -335,7 +333,7 @@ class BehaviorTreePreviewManager {
         // Force update
         const panel = this._previews.get(uri.toString());
         if (panel) {
-            vscode.workspace.openTextDocument(uri).then(doc => this.updateWebview(panel, doc));
+            this.updateWebviewWithContent(panel, this.formatXml(doc), path.dirname(filePath));
         }
     }
     // Helper to find node by XML ID attribute (for finding the Tree itself)
@@ -357,7 +355,10 @@ class BehaviorTreePreviewManager {
         return null;
     }
     updateWebview(panel, document) {
-        const processedXml = this.processXml(document.getText(), path.dirname(document.uri.fsPath));
+        this.updateWebviewWithContent(panel, document.getText(), path.dirname(document.uri.fsPath));
+    }
+    updateWebviewWithContent(panel, content, rootPath) {
+        const processedXml = this.processXml(content, rootPath);
         panel.webview.postMessage({
             type: 'update',
             text: processedXml,
@@ -534,54 +535,24 @@ class BehaviorTreePreviewManager {
             }
         }
     }
-    handleAttributeEdit(document, nodeId, occurrenceIndex, attr, value) {
-        // ... (Existing attribute edit logic if needed, but not used by current UI for reparenting)
-        // Leaving it as a stub or stripped if not strictly required by current Task.
-        // But for completeness, let's keep it? 
-        // The user didn't ask to remove it. I'll re-include the logic from the view_file.
-        const text = document.getText();
-        const idPattern = new RegExp(`<\\w+[^>]*\\b(ID|name)="${nodeId}"[^>]*>`, 'g');
-        let match;
-        let count = 0;
-        let targetMatch = null;
-        while ((match = idPattern.exec(text)) !== null) {
-            if (count === occurrenceIndex) {
-                targetMatch = match;
-                break;
-            }
-            count++;
-        }
-        if (!targetMatch)
+    handleEditAttribute(uri, nodeId, attr, value) {
+        const filePath = uri.fsPath;
+        if (!fs.existsSync(filePath))
             return;
-        const tagContent = targetMatch[0];
-        const tagStartOffset = targetMatch.index;
-        const attrPattern = new RegExp(`\\b${attr}="([^"]*)"`);
-        const attrMatch = attrPattern.exec(tagContent);
-        if (attrMatch) {
-            const valStartLocal = attrMatch.index + attrMatch[0].indexOf('"') + 1;
-            const valLength = attrMatch[1].length;
-            const absOffset = tagStartOffset + valStartLocal;
-            const startPos = document.positionAt(absOffset);
-            const endPos = document.positionAt(absOffset + valLength);
-            const edit = new vscode.WorkspaceEdit();
-            edit.replace(document.uri, new vscode.Range(startPos, endPos), value);
-            vscode.workspace.applyEdit(edit).then(s => { if (s)
-                document.save(); });
+        const content = fs.readFileSync(filePath, 'utf8');
+        const doc = new xmldom_1.DOMParser().parseFromString(content, 'text/xml');
+        const node = this.findElementByPath(doc.documentElement, nodeId);
+        if (node) {
+            node.setAttribute(attr, value);
+            this.saveXml(filePath, doc);
+            // Force update
+            const panel = this._previews.get(uri.toString());
+            if (panel) {
+                vscode.workspace.openTextDocument(uri).then(doc => this.updateWebview(panel, doc));
+            }
         }
         else {
-            let insertPosLocal = -1;
-            if (tagContent.endsWith('/>'))
-                insertPosLocal = tagContent.length - 2;
-            else if (tagContent.endsWith('>'))
-                insertPosLocal = tagContent.length - 1;
-            if (insertPosLocal !== -1) {
-                const absOffset = tagStartOffset + insertPosLocal;
-                const pos = document.positionAt(absOffset);
-                const edit = new vscode.WorkspaceEdit();
-                edit.replace(document.uri, new vscode.Range(pos, pos), ` ${attr}="${value}"`);
-                vscode.workspace.applyEdit(edit).then(s => { if (s)
-                    document.save(); });
-            }
+            vscode.window.showErrorMessage(`Could not find node with path: ${nodeId}`);
         }
     }
     getHtmlForWebview(webview) {

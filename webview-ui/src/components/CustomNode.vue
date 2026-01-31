@@ -2,7 +2,8 @@
 import { Handle, Position } from '@vue-flow/core';
 import { computed } from 'vue';
 
-const props = defineProps(['data']);
+const props = defineProps(['id', 'data', 'sourcePosition', 'targetPosition', 'showPorts']);
+const emit = defineEmits(['update-attribute']);
 
 const typeClass = computed(() => {
     return props.data.type?.toLowerCase() || 'default';
@@ -32,18 +33,51 @@ const iconSvg = computed(() => {
     return icons[key] || icons['default'];
 });
 
+const isLeaf = computed(() => {
+    const type = props.data.type?.toLowerCase();
+    return type === 'action' || type === 'condition';
+});
+
+const attributes = computed(() => {
+    if (!props.data.attributes) return [];
+    return Object.entries(props.data.attributes)
+        .filter(([key]) => key !== 'ID' && key !== 'name')
+        .map(([key, value]) => ({ key, value }));
+});
+
+function onAttributeChange(key: string, event: Event) {
+    const value = (event.target as HTMLInputElement).value;
+    emit('update-attribute', {
+        nodeId: props.id, 
+        attr: key,
+        value
+    });
+}
+
 </script>
 
 <template>
   <div class="custom-node" :class="typeClass" :style="{ borderColor: statusColor, boxShadow: statusColor !== 'transparent' ? `0 0 5px ${statusColor}` : 'none' }">
-    <Handle type="target" :position="Position.Top" class="handle" />
+    <Handle type="target" :position="targetPosition || Position.Top" class="handle" />
     
     <div class="node-content">
         <div class="icon" v-html="iconSvg"></div>
         <div class="label">{{ data.label }}</div>
     </div>
 
-    <Handle type="source" :position="Position.Bottom" class="handle" />
+    <div class="ports" v-if="showPorts && attributes.length > 0">
+        <div v-for="attr in attributes" :key="attr.key" class="port-item">
+            <span class="port-label">{{ attr.key }}:</span>
+            <input 
+                type="text" 
+                :value="attr.value" 
+                @change="onAttributeChange(attr.key, $event)"
+                class="port-input"
+            />
+        </div>
+    </div>
+
+    <Handle type="source" :position="sourcePosition || Position.Bottom" class="handle" v-if="!isLeaf" />
   </div>
 </template>
 
@@ -115,5 +149,37 @@ const iconSvg = computed(() => {
     border-color: #ff9800;
 }
 .custom-node.condition .icon { color: #f57c00; }
+
+.ports {
+    width: 100%;
+    margin-top: 8px;
+    border-top: 1px solid #eee;
+    padding-top: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.port-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    width: 100%;
+}
+
+.port-label {
+    color: #666;
+    flex-shrink: 0;
+}
+
+.port-input {
+    flex: 1;
+    border: 1px solid #ddd;
+    border-radius: 2px;
+    padding: 2px 4px;
+    font-size: 10px;
+    min-width: 0; 
+}
 
 </style>

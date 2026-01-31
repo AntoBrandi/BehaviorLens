@@ -12,6 +12,8 @@ const currentMode = ref<'editor' | 'inspection'>('editor');
 const menu = ref<{ x: number; y: number; type: 'node' | 'edge'; id: string } | null>(null);
 const userNodePositions = ref(new Map<string, {x: number, y: number}>());
 const isFirstLoad = ref(true);
+const layoutDirection = ref('TB');
+const showPorts = ref(false);
 
 // Vue Flow
 const { onConnect, addEdges, onNodeDragStop, fitView, setNodes, setEdges, applyNodeChanges, applyEdgeChanges, removeNodes, removeEdges } = useVueFlow();
@@ -102,7 +104,7 @@ function getNodeType(tagName: string): string {
     if (['sequence', 'fallback', 'parallel', 'reactivesequence', 'reactivefallback', 'switch2', 'switch3', 'switch4', 'if', 'while'].includes(lower)) {
         return 'control';
     }
-    if (['inverter', 'forcesuccess', 'forcefailure', 'repeat', 'retry', 'timeout', 'delay'].includes(lower)) {
+    if (['inverter', 'forcesuccess', 'forcefailure', 'repeat', 'retry', 'timeout', 'delay', 'keeprunninguntilfailure', 'alwayssuccess', 'alwaysfailure'].includes(lower)) {
         return 'decorator';
     }
     // Heuristic: If it has "Condition" in name it's likely a condition
@@ -237,7 +239,7 @@ function parseXML(text: string) {
         }
     }
 
-    const layout = getLayoutedElements(newNodes, newEdges, 'TB');
+    const layout = getLayoutedElements(newNodes, newEdges, layoutDirection.value);
     
     // Position Reconciliation
     layout.nodes.forEach((node: any) => {
@@ -288,12 +290,28 @@ dagreGraph.setDefaultEdgeLabel(() => ({}));
 const nodeWidth = 172;
 const nodeHeight = 36;
 
+// Helper to count visible attributes
+function countAttributes(attributes: any) {
+    if (!attributes) return 0;
+    return Object.keys(attributes).filter(k => k !== 'ID' && k !== 'name').length;
+}
+
 function getLayoutedElements(nodes: any[], edges: any[], direction = 'TB') {
   const isHorizontal = direction === 'LR';
   dagreGraph.setGraph({ rankdir: direction });
 
   nodes.forEach((node) => {
-    dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight });
+    let height = nodeHeight;
+    if (showPorts.value) {
+        const attrCount = countAttributes(node.data.attributes);
+        // Approx height per port (label + input + gap) ~ 30px? 
+        // Style says 10px font, padding... let's say 28px per port to be safe
+        if (attrCount > 0) {
+            height += 8; // Top margin for ports container
+            height += attrCount * 32; // Per port item
+        }
+    }
+    dagreGraph.setNode(node.id, { width: nodeWidth, height: height });
   });
 
   edges.forEach((edge) => {
@@ -304,13 +322,12 @@ function getLayoutedElements(nodes: any[], edges: any[], direction = 'TB') {
 
   nodes.forEach((node) => {
     const nodeWithPosition = dagreGraph.node(node.id);
+    // Shift dagre center to top-left for Vue Flow
     node.targetPosition = isHorizontal ? Position.Left : Position.Top;
     node.sourcePosition = isHorizontal ? Position.Right : Position.Bottom;
-
-    // Shift dagre center to top-left for Vue Flow
     node.position = { 
         x: nodeWithPosition.x - nodeWidth / 2, 
-        y: nodeWithPosition.y - nodeHeight / 2 
+        y: nodeWithPosition.y - nodeWithPosition.height / 2 
     };
   });
 
@@ -342,8 +359,12 @@ function handleNodeDragStop(event: any) {
     // 3. Get Nodes and Sort by X Position
     const siblingNodes = nodes.value.filter((n: any) => siblingIds.includes(n.id));
     
-    // Sort logic: Left to Right
-    siblingNodes.sort((a: any, b: any) => a.position.x - b.position.x);
+    // Sort logic: Left to Right (TB) or Top to Bottom (LR)
+    if (layoutDirection.value === 'LR') {
+        siblingNodes.sort((a: any, b: any) => a.position.y - b.position.y);
+    } else {
+        siblingNodes.sort((a: any, b: any) => a.position.x - b.position.x);
+    }
 
     const newOrderIds = siblingNodes.map((n: any) => n.id);
 
@@ -389,6 +410,32 @@ function toggleMode() {
   });
 }
 
+function toggleLayout() {
+  layoutDirection.value = layoutDirection.value === 'TB' ? 'LR' : 'TB';
+  // Clear user positions when switching layout, as they are relative to the old layout
+  userNodePositions.value.clear();
+  
+  const layout = getLayoutedElements(nodes.value, edges.value, layoutDirection.value);
+  // Re-assign to trigger update
+  nodes.value = [...layout.nodes];
+  edges.value = [...layout.edges];
+  
+  setTimeout(() => fitView({ padding: 0.2 }), 50);
+}
+
+// Toggle Ports
+function togglePorts() {
+  showPorts.value = !showPorts.value;
+  
+  // Re-run layout to account for size changes
+  const layout = getLayoutedElements(nodes.value, edges.value, layoutDirection.value);
+  nodes.value = [...layout.nodes];
+  edges.value = [...layout.edges];
+
+  setTimeout(() => fitView({ padding: 0.2 }), 50);
+}
+
+
 // Global VS Code API
 declare const acquireVsCodeApi: any;
 const vscode = acquireVsCodeApi();
@@ -428,6 +475,16 @@ window.addEventListener('message', event => {
       break;
   }
 });
+
+
+function onUpdateAttribute(payload: any) {
+    vscode.postMessage({
+        type: 'editAttribute',
+        nodeId: payload.nodeId,
+        attr: payload.attr,
+        value: payload.value
+    });
+}
 </script>
 
 <template>
@@ -436,10 +493,12 @@ window.addEventListener('message', event => {
       <button @click="toggleMode">
         Mode: {{ currentMode === 'editor' ? 'Editor' : 'Inspection' }}
       </button>
-      <div v-if="currentMode === 'editor'">
-        <!-- Editor specific controls -->
-        <span>Using Vue Flow Editor</span>
-      </div>
+      <button @click="toggleLayout">
+        Layout: {{ layoutDirection === 'TB' ? 'Vertical' : 'Horizontal' }}
+      </button>
+      <button @click="togglePorts">
+        {{ showPorts ? 'Hide Ports' : 'Show Ports' }}
+      </button>
     </div>
 
     <div class="dnd-flow" @drop="onDrop" @dragover="onDragOver">
@@ -463,7 +522,14 @@ window.addEventListener('message', event => {
             @edge-context-menu="onEdgeContextMenu"
           >
             <template #node-custom="props">
-                <CustomNode :data="props.data" />
+                <CustomNode 
+                    :id="props.id"
+                    :data="props.data" 
+                    :source-position="props.sourcePosition" 
+                    :target-position="props.targetPosition"
+                    :show-ports="showPorts"
+                    @update-attribute="onUpdateAttribute"
+                />
             </template>
             <Background />
             <Controls />
