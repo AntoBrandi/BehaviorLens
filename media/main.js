@@ -239,8 +239,7 @@ function initTree(data, container) {
 
 function update(source) {
     // Layout config
-    // Layout config
-    const baseNodeH = 60;
+    const baseNodeH = 70;
     const baseNodeW = 140;
 
     // --- Pre-calculate dimensions ---
@@ -316,14 +315,26 @@ function update(source) {
         // Height will be updated in merge, start small
         .attr('height', baseNodeH)
         .attr('x', -nodeW / 2)
-        .attr('y', -30) // Fixed top centering relative to link
+        .attr('y', -35) // Fixed top centering relative to link
 
         .style('opacity', 0); // Fade in
 
     // Icons
     nodeEnter.each(function (d) {
         const el = d3.select(this);
-        let iconText = getIcon(d.data.name);
+        // Infer Type
+        const numChildren = (d.data.children || []).length;
+        // If it has hidden children in _children, it's definitely a parent (Control/Decorator)
+        // But d.data.children might be the parsed XML children? 
+        // d.data.children is populated in parseXmlNode. 
+        // d.children and d._children are D3 properties.
+        // Let's use d.data.children.length to be safe about "is it a leaf in the text" vs "is it collapsed".
+        const dataChildrenCount = (d.data.children && d.data.children.length) || 0;
+
+        const type = getNodeType(d.data.name, dataChildrenCount);
+        d.data._type = type; // Store for usage in rect styling matching
+
+        let iconText = getIcon(d.data.name, type);
         if (iconText) {
             el.append("text")
                 .attr("y", -15)
@@ -332,6 +343,9 @@ function update(source) {
                 .style("fill", "#00bcd4")
                 .text(iconText);
         }
+
+        // Add type class for CSS styling
+        d3.select(this).classed(type, true);
     });
 
     // Text Name
@@ -358,6 +372,11 @@ function update(source) {
     // Update Position
     const nodeUpdate = nodeEnter.merge(node);
 
+    // Update classes (in case node type changed?? unlikely dynamic, but good practice)
+    nodeUpdate.each(function (d) {
+        if (d.data._type) d3.select(this).classed(d.data._type, true);
+    });
+
     nodeUpdate.transition().duration(duration)
         .attr('transform', d => {
             if (isVertical) return `translate(${d.x},${d.y})`;
@@ -378,7 +397,7 @@ function update(source) {
             return count > 0 ? baseNodeH + (count * 22) + 10 : baseNodeH;
         })
         .attr('y', d => {
-            return -30; // Keep fixed top relative to link connection
+            return -35; // Keep fixed top relative to link connection
         })
         .style('stroke', d => d._children ? "#ff79c6" : null) // Highlight collapsed
         .style('opacity', 1);
@@ -620,17 +639,51 @@ function copyVisibleHierarchy(source) {
     return node;
 }
 
+// --- Node Types and Icons ---
+
+const CONTROLS = new Set([
+    'Sequence', 'Fallback', 'Parallel', 'ReactiveSequence', 'ReactiveFallback',
+    'SequenceStar', 'FallbackStar', 'IfThenElse', 'WhileDo', 'Switch2', 'Switch3', 'Switch4', 'Switch5', 'Switch6'
+]);
+
+const DECORATORS = new Set([
+    'Inverter', 'ForceSuccess', 'ForceFailure', 'Repeat', 'RetryUntilSuccessful', 'KeepRunningUntilFailure',
+    'Delay', 'TimeLimit', 'BlackboardCheckDecorator', 'SubTree', 'Root' // SubTree behaves like a decorator/leaf technically
+]);
+
+// Helper to determine node type
+function getNodeType(name, childCount) {
+    if (CONTROLS.has(name)) return "Control";
+    if (DECORATORS.has(name)) return "Decorator";
+    if (name.endsWith("Action")) return "Action"; // Common convention
+    if (name.endsWith("Condition")) return "Condition"; // Common convention
+
+    // Heuristics
+    if (childCount > 0) return "Control";
+    return "Action"; // Default leaf is action
+}
+
 // Helper icons
-function getIcon(name) {
+function getIcon(name, type) {
+    // Specific Overrides
     switch (name) {
         case "Sequence": return "→";
         case "Fallback": return "?";
         case "Parallel": return "⇉";
-        case "Action": return "⚡";
-        case "Condition": return "○";
-        case "Decorator": return "◆";
-        case "Control": return "❖";
+        case "ReactiveSequence": return "R→";
+        case "ReactiveFallback": return "R?";
+        case "Inverter": return "!";
+        case "ForceSuccess": return "✓";
+        case "ForceFailure": return "✕";
         case "SubTree": return "📁";
+    }
+
+    // Generic by Type
+    switch (type) {
+        case "Control": return "❖";
+        case "Decorator": return "◆";
+        case "Condition": return "○";
+        case "Action": return "⚡";
         default: return "";
     }
 }

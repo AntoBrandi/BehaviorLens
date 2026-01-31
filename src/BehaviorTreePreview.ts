@@ -1,10 +1,15 @@
 import * as vscode from 'vscode';
+import { DOMParser, XMLSerializer } from 'xmldom';
+import * as cp from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export class BehaviorTreePreviewManager {
     public static readonly viewType = 'behaviortree.preview';
     private static _instance: BehaviorTreePreviewManager;
 
     private readonly _previews = new Map<string, vscode.WebviewPanel>();
+    private _bridgeProcess: cp.ChildProcess | undefined;
 
     public static getInstance(extensionUri: vscode.Uri): BehaviorTreePreviewManager {
         if (!BehaviorTreePreviewManager._instance) {
@@ -63,127 +68,569 @@ export class BehaviorTreePreviewManager {
         panel.webview.onDidReceiveMessage(message => {
             switch (message.type) {
                 case 'editAttribute':
-                    // We need a fresh doc reference? 'document' from showPreview scope might be stale if replaced?
-                    // Actually vscode.TextDocument objects can become closed, but reusing the one from openTextDocument is usually okay 
-                    // provided the URI is the same. Ideally we re-fetch open document or use the event.
-                    // For simplicity, find doc by uri.
                     vscode.workspace.openTextDocument(uri).then(doc => {
                         this.handleAttributeEdit(doc, message.nodeId, message.occurrenceIndex, message.attr, message.value);
                     });
+                    break;
+                case 'reparent_node':
+                    this.handleMoveNode(uri, message.sourceId, message.targetId);
+                    break;
+                case 'switchMode':
+                    if (message.mode === 'inspection') {
+                        this.startInspectionMode(panel);
+                    } else {
+                        this.stopInspectionMode();
+                    }
+                    break;
+                case 'add_node':
+                    this.handleAddNode(uri, message.nodeType);
+                    break;
+                case 'delete_node':
+                    this.handleDeleteNode(uri, message.id);
+                    break;
+                case 'delete_edge':
+                    this.handleDeleteEdge(uri, message.targetId);
+                    break;
+                case 'reorder_children':
+                    this.handleReorderChildren(uri, message.parentId, message.newOrder);
                     break;
             }
         });
 
         // Initial update
         this.updateWebview(panel, document);
-    }
 
-    private updateWebview(panel: vscode.WebviewPanel, document: vscode.TextDocument) {
-        panel.webview.postMessage({
-            type: 'update',
-            text: document.getText(),
+        // Cleanup on dispose
+        panel.onDidDispose(() => {
+            this.stopInspectionMode();
+            this._previews.delete(uri.toString());
         });
-
-        // Ensure we only register the listener once per panel or handle it appropriately
-        // Actually, updateWebview is called on document change, so we shouldn't register listeners here repeatedly.
-        // It's better to register in `showPreview` or constructor.
-        // BUT, `updateWebview` is convenient because we have the `document` ref.
-        // Let's modify `showPreview` to register the listener, and pass the document retrieval logic.
     }
 
-    private handleAttributeEdit(document: vscode.TextDocument, nodeId: string, occurrenceIndex: number, attr: string, value: string) {
-        const text = document.getText();
-
-        // 1. Find the node by ID or Name.
-        // ID should be inside the tag attributes.
-        // We match either ID="nodeId" OR name="nodeId".
-        // Regex: <TagName ... (ID="id" | name="id") ... >
-        const idPattern = new RegExp(`<\\w+[^>]*\\b(ID|name)="${nodeId}"[^>]*>`, 'g');
-
-        let match;
-        let count = 0;
-        let targetMatch = null;
-
-        while ((match = idPattern.exec(text)) !== null) {
-            if (count === occurrenceIndex) {
-                targetMatch = match;
-                break;
-            }
-            count++;
+    // Helper to find node by Structural Path ID (e.g., "0-1-3")
+    // "0" is root. "0-1" is 2nd child of root.
+    private findElementByPath(root: Node, pathStr: string): Element | null {
+        // Root is "0"
+        if (pathStr === '0') {
+            return root as Element;
         }
 
-        if (!targetMatch) {
-            console.error(`Node ${nodeId} at index ${occurrenceIndex} not found`);
+        const indices = pathStr.split('-').map(s => parseInt(s, 10));
+        if (indices[0] !== 0) return null; // Must start with root 0
+
+        let currentNode: Element = root as Element;
+
+        // Iterate remaining indices
+        for (let i = 1; i < indices.length; i++) {
+            const targetChildIndex = indices[i];
+            let foundChild: Element | null = null;
+            let currentChildIndex = 0;
+
+            // Iterate child nodes to find the N-th Element
+            let look = currentNode.firstChild;
+            while (look) {
+                if (look.nodeType === 1) { // Element only
+                    if (currentChildIndex === targetChildIndex) {
+                        foundChild = look as Element;
+                        break;
+                    }
+                    currentChildIndex++;
+                }
+                look = look.nextSibling;
+            }
+
+            if (!foundChild) return null; // Path invalid
+            currentNode = foundChild;
+        }
+
+        return currentNode;
+    }
+
+    private handleDeleteNode(uri: vscode.Uri, id: string) {
+        const filePath = uri.fsPath;
+        if (!fs.existsSync(filePath)) return;
+
+        const content = fs.readFileSync(filePath, 'utf8');
+        const doc = new DOMParser().parseFromString(content, 'text/xml');
+
+        const node = this.findElementByPath(doc.documentElement, id);
+        if (node && node.parentNode) {
+            node.parentNode.removeChild(node);
+            this.saveXml(filePath, doc);
+
+            // Force update
+            const panel = this._previews.get(uri.toString());
+            if (panel) {
+                vscode.workspace.openTextDocument(uri).then(doc => this.updateWebview(panel, doc));
+            }
+        }
+    }
+
+    private handleDeleteEdge(uri: vscode.Uri, childId: string) {
+        const filePath = uri.fsPath;
+        if (!fs.existsSync(filePath)) return;
+
+        const content = fs.readFileSync(filePath, 'utf8');
+        const doc = new DOMParser().parseFromString(content, 'text/xml');
+
+        const childNode = this.findElementByPath(doc.documentElement, childId);
+        const treeRoot = doc.getElementsByTagName('BehaviorTree')[0] || doc.documentElement;
+
+        if (childNode && treeRoot) {
+            if (childNode.parentNode) {
+                childNode.parentNode.removeChild(childNode);
+            }
+            treeRoot.appendChild(childNode);
+
+            this.saveXml(filePath, doc);
+
+            // Force update
+            const panel = this._previews.get(uri.toString());
+            if (panel) {
+                vscode.workspace.openTextDocument(uri).then(doc => this.updateWebview(panel, doc));
+            }
+        }
+    }
+
+    private handleMoveNode(uri: vscode.Uri, sourceId: string, targetId: string) {
+        const filePath = uri.fsPath;
+        if (!fs.existsSync(filePath)) return;
+
+        const content = fs.readFileSync(filePath, 'utf8');
+        const doc = new DOMParser().parseFromString(content, 'text/xml');
+
+        const sourceNode = this.findElementByPath(doc.documentElement, sourceId);
+        const targetNode = this.findElementByPath(doc.documentElement, targetId);
+
+        if (sourceNode && targetNode) {
+            // Check for cycles
+            let check = targetNode;
+            let failure = false;
+            while (check) {
+                if (check === sourceNode) {
+                    failure = true;
+                    break;
+                }
+                check = check.parentNode as Element;
+            }
+            if (failure) return;
+
+            if (sourceNode.parentNode) {
+                sourceNode.parentNode.removeChild(sourceNode);
+            }
+            targetNode.appendChild(sourceNode);
+            this.saveXml(filePath, doc);
+
+            // Force update
+            const panel = this._previews.get(uri.toString());
+            if (panel) {
+                vscode.workspace.openTextDocument(uri).then(doc => this.updateWebview(panel, doc));
+            }
+        } else {
+            console.warn(`Could not find source ${sourceId} or target ${targetId} for move`);
+        }
+    }
+
+    private handleReorderChildren(uri: vscode.Uri, parentId: string, newOrder: string[]) {
+        const filePath = uri.fsPath;
+        if (!fs.existsSync(filePath)) return;
+
+        const content = fs.readFileSync(filePath, 'utf8');
+        const doc = new DOMParser().parseFromString(content, 'text/xml');
+
+        const parentNode = this.findElementByPath(doc.documentElement, parentId);
+        if (!parentNode) return;
+
+        // Resolve all children FIRST to avoid index invalidation during moves
+        const childElements: Element[] = [];
+        let valid = true;
+        for (const childId of newOrder) {
+            const el = this.findElementByPath(doc.documentElement, childId);
+            if (!el) {
+                valid = false;
+                break;
+            }
+            childElements.push(el);
+        }
+
+        if (valid) {
+            // Re-append in new order
+            childElements.forEach(el => {
+                if (el.parentNode === parentNode) {
+                    parentNode.appendChild(el);
+                }
+            });
+
+
+            this.saveXml(filePath, doc);
+
+            // Force update
+            const panel = this._previews.get(uri.toString());
+            if (panel) {
+                vscode.workspace.openTextDocument(uri).then(doc => this.updateWebview(panel, doc));
+            }
+        }
+    }
+
+    // ... Inspection methods ...
+    private startInspectionMode(panel: vscode.WebviewPanel) {
+        if (this._bridgeProcess) {
             return;
         }
 
+        const pythonPath = 'python3';
+        const scriptPath = path.join(this._extensionUri.fsPath, 'src', 'ros_bridge.py');
+
+        try {
+            this._bridgeProcess = cp.spawn(pythonPath, [scriptPath]);
+
+            this._bridgeProcess.stdout?.on('data', (data) => {
+                const lines = data.toString().split('\n');
+                for (const line of lines) {
+                    if (line.trim()) {
+                        try {
+                            const json = JSON.parse(line);
+                            panel.webview.postMessage({
+                                type: 'status_update',
+                                data: json
+                            });
+                        } catch (e) {
+                            console.log('Bridge output:', line);
+                        }
+                    }
+                }
+            });
+
+            this._bridgeProcess.stderr?.on('data', (data) => {
+                console.error('Bridge error:', data.toString());
+            });
+
+            this._bridgeProcess.on('error', (err) => {
+                vscode.window.showErrorMessage(`Failed to start ROS bridge: ${err.message}`);
+                this.stopInspectionMode();
+            });
+
+            this._bridgeProcess.on('exit', (code, signal) => {
+                console.log(`Bridge exited with code ${code} and signal ${signal}`);
+                this._bridgeProcess = undefined;
+            });
+
+            vscode.window.showInformationMessage("Inspection Mode Started: Listening to ROS 2 topic...");
+
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`Error starting bridge: ${e.message}`);
+        }
+    }
+
+    private stopInspectionMode() {
+        if (this._bridgeProcess) {
+            this._bridgeProcess.kill();
+            this._bridgeProcess = undefined;
+            vscode.window.showInformationMessage("Inspection Mode Stopped.");
+        }
+    }
+
+
+    private handleAddNode(uri: vscode.Uri, nodeType: string) {
+        const filePath = uri.fsPath;
+        if (!fs.existsSync(filePath)) return;
+
+        const content = fs.readFileSync(filePath, 'utf8');
+        const doc = new DOMParser().parseFromString(content, 'text/xml');
+
+        // Logic to determine which Tree is the "Main" one, matching frontend logic
+        let tree: Element | null = null;
+        const root = doc.documentElement;
+
+        if (root.tagName === 'root' && root.getAttribute('main_tree_to_execute')) {
+            const mainTreeId = root.getAttribute('main_tree_to_execute');
+            const candidate = this.findNodeById(doc, mainTreeId!); // Reuse findNode if possible or query selector
+            if (candidate && candidate.tagName === 'BehaviorTree') {
+                tree = candidate;
+            }
+        }
+
+        if (!tree) {
+            tree = doc.getElementsByTagName('BehaviorTree')[0] || doc.documentElement;
+        }
+
+        // Create Node
+        // Generate ID
+        const id = `${nodeType}_${Date.now()}`;
+        const newNode = doc.createElement(nodeType);
+        newNode.setAttribute('ID', id); // Standard BT attribute
+        newNode.setAttribute('name', id);
+
+        // Append to the determined tree
+        tree.appendChild(newNode);
+
+        // Save
+        this.saveXml(filePath, doc);
+
+        // Force update
+        const panel = this._previews.get(uri.toString());
+        if (panel) {
+            vscode.workspace.openTextDocument(uri).then(doc => this.updateWebview(panel, doc));
+        }
+    }
+
+    // Helper to find node by XML ID attribute (for finding the Tree itself)
+    private findNodeById(doc: Document, id: string): Element | null {
+        const queue: any[] = [doc.documentElement];
+        while (queue.length > 0) {
+            const node = queue.shift();
+            if (!node) continue;
+            if (node.getAttribute && node.getAttribute('ID') === id) {
+                return node;
+            }
+            for (let i = 0; i < node.childNodes.length; i++) {
+                if (node.childNodes[i].nodeType === 1) {
+                    queue.push(node.childNodes[i] as Element);
+                }
+            }
+        }
+        return null;
+    }
+
+    private updateWebview(panel: vscode.WebviewPanel, document: vscode.TextDocument) {
+        const processedXml = this.processXml(document.getText(), path.dirname(document.uri.fsPath));
+        panel.webview.postMessage({
+            type: 'update',
+            text: processedXml,
+        });
+    }
+
+    private saveXml(filePath: string, doc: Document) {
+        const content = this.formatXml(doc);
+        fs.writeFileSync(filePath, content);
+    }
+
+    private formatXml(doc: Document): string {
+        // Ensure all nodes have IDs for stability
+        this.ensureIds(doc.documentElement);
+        // Strip whitespace text nodes first to avoid double indenting
+        this.stripWhitespace(doc.documentElement);
+        return '<?xml version="1.0"?>\n' + this.prettyPrint(doc.documentElement, 0);
+    }
+
+    private ensureIds(node: Node) {
+        if (node.nodeType === 1) { // Element
+            const el = node as Element;
+            if (!el.getAttribute('ID')) {
+                const id = `${el.tagName}_${Math.random().toString(36).substr(2, 9)}`;
+                el.setAttribute('ID', id);
+            }
+
+
+            let child = node.firstChild;
+            while (child) {
+                this.ensureIds(child);
+                child = child.nextSibling;
+            }
+        }
+    }
+
+    private stripWhitespace(node: Node) {
+        let child = node.firstChild;
+        while (child) {
+            const next = child.nextSibling;
+            if (child.nodeType === 3 && !/\S/.test(child.nodeValue || '')) {
+                node.removeChild(child);
+            } else if (child.nodeType === 1) {
+                this.stripWhitespace(child);
+            }
+            child = next;
+        }
+    }
+
+    private prettyPrint(node: Node, level: number): string {
+        const indent = '    '.repeat(level);
+        if (node.nodeType === 1) { // Element
+            const el = node as Element;
+            let str = `${indent}<${el.tagName}`;
+
+            // Attributes
+            for (let i = 0; i < el.attributes.length; i++) {
+                const attr = el.attributes[i];
+                str += ` ${attr.name}="${attr.value}"`;
+            }
+
+            if (!el.hasChildNodes()) {
+                str += '/>';
+            } else {
+                str += '>';
+                let hasElementChildren = false;
+                for (let i = 0; i < el.childNodes.length; i++) {
+                    if (el.childNodes[i].nodeType === 1) {
+                        hasElementChildren = true;
+                        break;
+                    }
+                }
+
+                if (hasElementChildren) {
+                    str += '\n';
+                    for (let i = 0; i < el.childNodes.length; i++) {
+                        str += this.prettyPrint(el.childNodes[i], level + 1);
+                        if (i < el.childNodes.length - 1 || el.childNodes[i].nodeType === 1) {
+                            str += '\n';
+                        }
+                    }
+                    str += `${indent}</${el.tagName}>`;
+                } else {
+                    // Text only content, keep inline (though usually BT nodes don't have text)
+                    for (let i = 0; i < el.childNodes.length; i++) {
+                        str += el.childNodes[i].nodeValue || '';
+                    }
+                    str += `</${el.tagName}>`;
+                }
+            }
+            return str;
+        } else if (node.nodeType === 3) { // Text
+            return (node.nodeValue || '').trim();
+        }
+        return '';
+    }
+
+    private processXml(content: string, rootPath: string): string {
+        try {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(content, 'text/xml');
+
+            // Check for parsing errors
+            const parserError = doc.getElementsByTagName("parsererror");
+            if (parserError.length > 0) {
+                return content; // Fallback to raw content so client can show error
+            }
+
+            this.expandIncludes(doc, rootPath, false);
+            return new XMLSerializer().serializeToString(doc);
+        } catch (e) {
+            console.error('Error processing XML includes:', e);
+            return content;
+        }
+    }
+
+    private expandIncludes(doc: Document, currentPath: string, inContainer: boolean) {
+        const includes = doc.getElementsByTagName('include');
+        // Convert live collection to array to avoid issues when checking length or iterating while modifying
+        const includeList = [];
+        for (let i = 0; i < includes.length; i++) {
+            includeList.push(includes[i]);
+        }
+
+        for (const inc of includeList) {
+            const rosPkg = inc.getAttribute('ros_pkg');
+            const pathAttr = inc.getAttribute('path');
+
+            let newPath = '';
+            let newInContainer = inContainer;
+
+            if (rosPkg) {
+                try {
+                    // Resolve via docker
+                    const cmd = `docker exec alum bash -c "source /opt/ros/*/setup.bash; if [ -f /opt/pal/alum/setup.bash ]; then source /opt/pal/alum/setup.bash; fi; ros2 pkg prefix --share ${rosPkg}"`;
+                    const pkgPath = cp.execSync(cmd, { encoding: 'utf8' }).trim();
+                    newPath = path.posix.join(pkgPath, pathAttr || ''); // Use posix for container paths
+                    newInContainer = true;
+                } catch (e) {
+                    console.warn(`Failed to resolve package ${rosPkg}`, e);
+                    continue;
+                }
+            } else if (pathAttr) {
+                if (inContainer) {
+                    newPath = path.posix.join(currentPath, pathAttr);
+                } else {
+                    newPath = path.resolve(currentPath, pathAttr);
+                }
+            }
+
+            if (newPath) {
+                try {
+                    let fileContent = '';
+                    if (newInContainer) {
+                        fileContent = cp.execSync(`docker exec alum cat ${newPath}`, { encoding: 'utf8' });
+                    } else {
+                        if (fs.existsSync(newPath)) {
+                            fileContent = fs.readFileSync(newPath, 'utf8');
+                        } else {
+                            console.warn(`File not found: ${newPath}`);
+                            continue;
+                        }
+                    }
+
+                    const includedDoc = new DOMParser().parseFromString(fileContent, 'text/xml');
+
+                    const nextPath = newInContainer ? path.posix.dirname(newPath) : path.dirname(newPath);
+                    this.expandIncludes(includedDoc, nextPath, newInContainer);
+
+                    const root = includedDoc.documentElement;
+                    if (root) {
+                        let child = root.firstChild;
+                        while (child) {
+                            const next = child.nextSibling;
+                            const importedNode = doc.importNode(child, true);
+                            inc.parentNode?.insertBefore(importedNode, inc);
+                            child = next;
+                        }
+                    }
+                    inc.parentNode?.removeChild(inc);
+
+                } catch (e) {
+                    console.warn(`Failed to read/parse included file ${newPath}`, e);
+                }
+            }
+        }
+    }
+
+
+    private handleAttributeEdit(document: vscode.TextDocument, nodeId: string, occurrenceIndex: number, attr: string, value: string) {
+        // ... (Existing attribute edit logic if needed, but not used by current UI for reparenting)
+        // Leaving it as a stub or stripped if not strictly required by current Task.
+        // But for completeness, let's keep it? 
+        // The user didn't ask to remove it. I'll re-include the logic from the view_file.
+        const text = document.getText();
+        const idPattern = new RegExp(`<\\w+[^>]*\\b(ID|name)="${nodeId}"[^>]*>`, 'g');
+        let match;
+        let count = 0;
+        let targetMatch = null;
+        while ((match = idPattern.exec(text)) !== null) {
+            if (count === occurrenceIndex) { targetMatch = match; break; }
+            count++;
+        }
+        if (!targetMatch) return;
+
         const tagContent = targetMatch[0];
         const tagStartOffset = targetMatch.index;
-
-        // 2. Find attribute within the tag
-        // Use word boundary to ensure we don't match substrings (e.g. 'attr' inside 'my_attr')
         const attrPattern = new RegExp(`\\b${attr}="([^"]*)"`);
         const attrMatch = attrPattern.exec(tagContent);
 
         if (attrMatch) {
-            // Found existing attribute
-            // attrMatch[0] is `attr="val"` (with possible leading boundary match, but \b is zero-width)
-            // But wait, if \b matches start of string or space, it's fine.
-
             const valStartLocal = attrMatch.index + attrMatch[0].indexOf('"') + 1;
             const valLength = attrMatch[1].length;
-
             const absOffset = tagStartOffset + valStartLocal;
-
             const startPos = document.positionAt(absOffset);
             const endPos = document.positionAt(absOffset + valLength);
-            const range = new vscode.Range(startPos, endPos);
-
             const edit = new vscode.WorkspaceEdit();
-            edit.replace(document.uri, range, value);
-            vscode.workspace.applyEdit(edit).then(success => {
-                if (success) document.save();
-            });
-
+            edit.replace(document.uri, new vscode.Range(startPos, endPos), value);
+            vscode.workspace.applyEdit(edit).then(s => { if (s) document.save(); });
         } else {
-            // Attribute missing, need to insert.
-            // Insert before the closing `>` or `/>`
-            // tagContent ends with `>` or `/>`
-            // We want to insert ` attr="value"` before that.
-
-            // Simplest way: Find last `>` or `/>` in tagContent.
-            // But tagContent might have `>` in attributes? (Wait, XML attributes can't have `>` unless escaped &gt;)
-            // Regex for tag matched `[^>]*>`. So it ends at the first `>`.
-            // So simpler: replace `/>` with ` attr="value"/>` or `>` with ` attr="value">`
-
             let insertPosLocal = -1;
-            let insertText = ` ${attr}="${value}"`;
-
-            if (tagContent.endsWith('/>')) {
-                insertPosLocal = tagContent.length - 2;
-            } else if (tagContent.endsWith('>')) {
-                insertPosLocal = tagContent.length - 1;
-            }
+            if (tagContent.endsWith('/>')) insertPosLocal = tagContent.length - 2;
+            else if (tagContent.endsWith('>')) insertPosLocal = tagContent.length - 1;
 
             if (insertPosLocal !== -1) {
                 const absOffset = tagStartOffset + insertPosLocal;
                 const pos = document.positionAt(absOffset);
-                const range = new vscode.Range(pos, pos); // Empty range for insertion
-
                 const edit = new vscode.WorkspaceEdit();
-                edit.replace(document.uri, range, insertText);
-                vscode.workspace.applyEdit(edit).then(success => {
-                    if (success) document.save();
-                });
+                edit.replace(document.uri, new vscode.Range(pos, pos), ` ${attr}="${value}"`);
+                vscode.workspace.applyEdit(edit).then(s => { if (s) document.save(); });
             }
         }
     }
 
     private getHtmlForWebview(webview: vscode.Webview): string {
-        // Convert on-disk resource paths to webview resource paths
-        const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'main.js'));
-        const scriptD3Uri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'd3.min.js'));
-        const styleMainUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'main.css'));
+        const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'assets', 'index.js'));
+        const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'assets', 'index.css'));
 
         return `
             <!DOCTYPE html>
@@ -191,19 +638,12 @@ export class BehaviorTreePreviewManager {
             <head>
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <link href="${styleMainUri}" rel="stylesheet" />
-                <script src="${scriptD3Uri}"></script>
+                <link href="${styleUri}" rel="stylesheet" />
                 <title>Behavior Lens</title>
             </head>
             <body>
-                <div id="toolbar">
-                    <button class="icon-btn" id="btn-layout">Layout: Vertical</button>
-                    <button class="icon-btn" id="btn-fit">Fit View</button>
-                    <button class="icon-btn" id="btn-ports">Show Ports</button>
-                </div>
-                <div id="tree-container"></div>
-                <div id="minimap"></div>
-                <script src="${scriptUri}"></script>
+                <div id="app"></div>
+                <script type="module" src="${scriptUri}"></script>
             </body>
             </html>`;
     }

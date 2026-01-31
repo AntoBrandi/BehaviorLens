@@ -113,24 +113,31 @@ body {
     stroke: #ffffff;
 }
 
-.node.Sequence>rect {
+/* Control Nodes */
+.node.Control>rect,
+.node.Sequence>rect,
+.node.Fallback>rect {
     stroke: var(--link-color);
+    /* Cyan */
 }
 
-.node.Fallback>rect {
+/* Decorator Nodes */
+.node.Decorator>rect,
+.node.Inverter>rect {
     stroke: var(--accent-purple);
 }
 
+/* Action Nodes */
 .node.Action>rect {
     stroke: #50fa7b;
+    /* Green */
 }
 
-/* Greenish */
+/* Condition Nodes */
 .node.Condition>rect {
     stroke: #ffb86c;
+    /* Orange */
 }
-
-/* Orange */
 
 /* Icon styling */
 .node-icon {
