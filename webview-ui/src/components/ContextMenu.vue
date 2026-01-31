@@ -7,10 +7,15 @@ const props = defineProps({
   type: { type: String, required: true } // 'node' or 'edge'
 });
 
-const emit = defineEmits(['close', 'delete']);
+const emit = defineEmits(['close', 'delete', 'rename']);
 
 function onDelete() {
   emit('delete');
+  emit('close');
+}
+
+function onRename() {
+  emit('rename');
   emit('close');
 }
 
@@ -24,6 +29,9 @@ const style = computed(() => ({
   <div class="context-menu" :style="style" @click.stop>
     <div class="menu-item" @click="onDelete">
       Delete {{ type }}
+    </div>
+    <div class="menu-item" v-if="type === 'node'" @click="onRename">
+      Rename Node
     </div>
   </div>
   <div class="context-menu-overlay" @click="$emit('close')"></div>

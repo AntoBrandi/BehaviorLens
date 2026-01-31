@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, computed, onErrorCaptured } from 'vue';
 import { VueFlow, useVueFlow, Position } from '@vue-flow/core';
 import { Background } from '@vue-flow/background';
 import { Controls } from '@vue-flow/controls';
@@ -14,6 +14,54 @@ const userNodePositions = ref(new Map<string, {x: number, y: number}>());
 const isFirstLoad = ref(true);
 const layoutDirection = ref('TB');
 const showPorts = ref(false);
+const errorLog = ref('');
+
+onErrorCaptured((err) => {
+    console.error("Captured Error:", err);
+    errorLog.value = String(err);
+    return false;
+});
+
+interface PortDef {
+    name: string;
+    type?: string;
+    description?: string;
+    default?: string;
+}
+
+interface NodeDef {
+    type: 'Action' | 'Condition' | 'Control' | 'Decorator';
+    ports: PortDef[];
+}
+
+const nodeLibrary = ref<Record<string, NodeDef>>({
+    'Sequence': { type: 'Control', ports: [] },
+    'Fallback': { type: 'Control', ports: [] },
+    'Action': { type: 'Action', ports: [] },
+    'Condition': { type: 'Condition', ports: [] }
+});
+
+const libraryGroups = computed(() => {
+    const groups: Record<string, string[]> = {
+        Control: [],
+        Decorator: [],
+        Action: [],
+        Condition: []
+    };
+    for (const [name, def] of Object.entries(nodeLibrary.value)) {
+        // Map XML tag names to our internal types if needed, or rely on naming convention
+        // Groot types: Action, Condition, Control, Decorator
+        const type = def.type;
+        if (groups[type]) {
+            groups[type].push(name);
+        } else {
+             // Fallback
+             if (!groups['Action']) groups['Action'] = [];
+             groups['Action'].push(name);
+        }
+    }
+    return groups;
+});
 
 // Vue Flow
 const { onConnect, addEdges, onNodeDragStop, fitView, setNodes, setEdges, applyNodeChanges, applyEdgeChanges, removeNodes, removeEdges } = useVueFlow();
@@ -98,8 +146,37 @@ function onDeleteFromMenu() {
     menu.value = null;
 }
 
+function onRenameFromMenu() {
+    if (!menu.value || menu.value.type !== 'node') return;
+    const nodeId = menu.value.id;
+    const node = nodes.value.find((n: any) => n.id === nodeId);
+    if (!node) return;
+
+    const currentName = node.data.label || node.label;
+    const newName = prompt("Enter new name for node:", currentName);
+    
+    if (newName && newName !== currentName) {
+        // Optimistic update
+        node.data.label = newName;
+        node.label = newName;
+        
+        vscode.postMessage({
+            type: 'rename_node',
+            id: nodeId,
+            newName: newName
+        });
+    }
+    menu.value = null;
+}
+
 // Type Inference Logic
 function getNodeType(tagName: string): string {
+    // 1. Check Library first
+    if (nodeLibrary.value[tagName]) {
+        return nodeLibrary.value[tagName].type.toLowerCase();
+    }
+
+    // 2. Fallback
     const lower = tagName.toLowerCase();
     if (['sequence', 'fallback', 'parallel', 'reactivesequence', 'reactivefallback', 'switch2', 'switch3', 'switch4', 'if', 'while'].includes(lower)) {
         return 'control';
@@ -272,6 +349,58 @@ function parseXML(text: string) {
     }
 }
 
+function parseLibraryXML(text: string) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(text, "text/xml");
+    const model = doc.getElementsByTagName('TreeNodesModel')[0];
+    if (!model) return;
+
+    const newLibrary: Record<string, NodeDef> = {};
+    
+    // Iterate over children of TreeNodesModel
+    for(let i=0; i<model.children.length; i++) {
+        const node = model.children[i];
+        if(node.nodeType !== 1) continue;
+
+        const tagName = node.tagName; // Action, Condition, Control, Decorator
+        const id = node.getAttribute('ID');
+        if (!id) continue;
+
+        let type: any = 'Action';
+        if (tagName === 'Action' || tagName === 'Condition' || tagName === 'Control' || tagName === 'Decorator') {
+            type = tagName;
+        }
+
+        const ports: PortDef[] = [];
+        for(let j=0; j<node.children.length; j++) {
+            const child = node.children[j];
+            if(child.nodeType !== 1) continue;
+            
+            if (child.tagName === 'input_port' || child.tagName === 'output_port' || child.tagName === 'inout_port') {
+                 ports.push({
+                     name: child.getAttribute('name') || '',
+                     type: child.getAttribute('type') || 'string',
+                     default: child.getAttribute('default') || undefined,
+                     description: child.textContent || ''
+                 });
+            }
+        }
+
+        newLibrary[id] = { type, ports };
+    }
+
+    // Merge or Replace? Let's Replace but keep defaults if wanting a clean slate, 
+    // OR merge with defaults. The user request implies "upload custom nodes... form a library".
+    // Usually standard nodes are always available.
+    // Let's merge with standard set.
+    // Merge with existing library
+    nodeLibrary.value = {
+        ...nodeLibrary.value,
+        ...newLibrary
+    };
+}
+
+
 onConnect((params) => {
     addEdges({ ...params, type: 'default' });
     vscode.postMessage({
@@ -423,6 +552,10 @@ function toggleLayout() {
   setTimeout(() => fitView({ padding: 0.2 }), 50);
 }
 
+function loadLibrary() {
+    vscode.postMessage({ type: 'loadLibrary' });
+}
+
 // Toggle Ports
 function togglePorts() {
   showPorts.value = !showPorts.value;
@@ -473,6 +606,9 @@ window.addEventListener('message', event => {
         handleStatusUpdate(message.data);
       }
       break;
+    case 'library_loaded':
+      parseLibraryXML(message.xml);
+      break;
   }
 });
 
@@ -489,6 +625,9 @@ function onUpdateAttribute(payload: any) {
 
 <template>
   <div class="app-container">
+    <div v-if="errorLog" style="color: red; padding: 20px; background: white; border: 1px solid red; z-index:9999; position:absolute;">
+        CRITICAL ERROR: {{ errorLog }}
+    </div>
     <div class="toolbar">
       <button @click="toggleMode">
         Mode: {{ currentMode === 'editor' ? 'Editor' : 'Inspection' }}
@@ -499,15 +638,28 @@ function onUpdateAttribute(payload: any) {
       <button @click="togglePorts">
         {{ showPorts ? 'Hide Ports' : 'Show Ports' }}
       </button>
+      <button @click="loadLibrary">
+        Load Library
+      </button>
     </div>
 
     <div class="dnd-flow" @drop="onDrop" @dragover="onDragOver">
       <div class="sidebar" v-if="currentMode === 'editor'">
          <div class="description">Drag nodes to the pane</div>
-         <div class="dndnode input" draggable="true" @dragstart="onDragStart($event, 'Sequence')">Sequence</div>
-         <div class="dndnode input" draggable="true" @dragstart="onDragStart($event, 'Fallback')">Fallback</div>
-         <div class="dndnode default" draggable="true" @dragstart="onDragStart($event, 'Action')">Action</div>
-         <div class="dndnode output" draggable="true" @dragstart="onDragStart($event, 'Condition')">Condition</div>
+         
+         <div v-for="(nodes, group) in libraryGroups" :key="group">
+            <div v-if="nodes.length > 0" class="group-title">{{ group }}</div>
+            <div 
+                v-for="nodeId in nodes" 
+                :key="nodeId" 
+                class="dndnode" 
+                :class="group.toLowerCase() === 'control' ? 'input' : (group.toLowerCase() === 'condition' ? 'output' : (group.toLowerCase() === 'decorator' ? 'decorator' : 'default'))"
+                draggable="true" 
+                @dragstart="onDragStart($event, nodeId)"
+            >
+                {{ nodeId }}
+            </div>
+         </div>
       </div>
       <div class="flow-container">
           <VueFlow 
@@ -529,22 +681,25 @@ function onUpdateAttribute(payload: any) {
                     :source-position="props.sourcePosition" 
                     :target-position="props.targetPosition"
                     :show-ports="showPorts"
+                    :definition="nodeLibrary[props.data.label] || nodeLibrary[props.data.originalName]"
                     @update-attribute="onUpdateAttribute"
                 />
             </template>
             <Background />
             <Controls />
-            <ContextMenu 
-                v-if="menu" 
-                :x="menu.x" 
-                :y="menu.y" 
-                :type="menu.type" 
-                @close="menu = null" 
-                @delete="onDeleteFromMenu" 
-            />
+
           </VueFlow>
       </div>
     </div>
+    <ContextMenu 
+        v-if="menu" 
+        :x="menu.x" 
+        :y="menu.y" 
+        :type="menu.type" 
+        @close="menu = null" 
+        @delete="onDeleteFromMenu" 
+        @rename="onRenameFromMenu"
+    />
   </div>
 </template>
 
@@ -565,13 +720,14 @@ function onUpdateAttribute(payload: any) {
 .dnd-flow {
     display: flex;
     flex: 1;
-    height: 100%;
+    min-height: 0;
 }
 .sidebar {
     width: 200px;
     border-right: 1px solid var(--vscode-panel-border);
     padding: 10px;
     background: var(--vscode-sideBar-background);
+    overflow-y: auto;
 }
 .dndnode {
     padding: 10px;
@@ -582,6 +738,14 @@ function onUpdateAttribute(payload: any) {
     border-radius: 6px;
     border: 1px solid transparent;
     font-weight: 500;
+}
+.group-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: #888;
+    margin-top: 10px;
+    margin-bottom: 4px;
+    font-weight: 600;
 }
 .dndnode.input { /* Control equivalent */
     background: #e3f2fd;
@@ -597,6 +761,11 @@ function onUpdateAttribute(payload: any) {
     background: #fff3e0;
     color: #ef6c00;
     border-color: #ff9800;
+}
+.dndnode.decorator { /* Decorator equivalent */
+    background: #f3e5f5;
+    color: #7b1fa2;
+    border-color: #9c27b0;
 }
 .flow-container {
   flex: 1;

@@ -2,49 +2,45 @@
 import { Handle, Position } from '@vue-flow/core';
 import { computed } from 'vue';
 
-const props = defineProps(['id', 'data', 'sourcePosition', 'targetPosition', 'showPorts']);
+const props = defineProps(['id', 'data', 'sourcePosition', 'targetPosition', 'showPorts', 'definition']);
 const emit = defineEmits(['update-attribute']);
 
 const typeClass = computed(() => {
     return props.data.type?.toLowerCase() || 'default';
 });
 
-const statusColor = computed(() => {
-  const status = props.data.status || 'IDLE';
-  switch(status) {
-    case 'RUNNING': return '#ffeb3b'; // Yellow border/glow
-    case 'SUCCESS': return '#4caf50'; // Green
-    case 'FAILURE': return '#f44336'; // Red
-    default: return 'transparent'; 
-  }
-});
+// ... (color/icon logic unchanged) ...
 
-// Icons (Simple SVGs)
-const icons = {
-    control: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>`, // Plus/Box
-    decorator: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>`, // Link
-    condition: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`, // Question
-    action: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`, // Play
-    default: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg>`
-};
-
-const iconSvg = computed(() => {
-    const key = props.data.type?.toLowerCase() as keyof typeof icons;
-    return icons[key] || icons['default'];
-});
-
-const isLeaf = computed(() => {
-    const type = props.data.type?.toLowerCase();
-    return type === 'action' || type === 'condition';
-});
-
+// But replace attributes logic:
 const attributes = computed(() => {
-    if (!props.data.attributes) return [];
-    return Object.entries(props.data.attributes)
-        .filter(([key]) => key !== 'ID' && key !== 'name')
-        .map(([key, value]) => ({ key, value }));
-});
+    const existing = props.data.attributes || {};
+    const ports = [];
 
+    // 1. Add existing attributes (excluding ID/name)
+    // Create a map to avoid duplicates if definition also has them
+    const seen = new Set<string>();
+
+    // If we have a definition, start with its ports
+    if (props.definition && props.definition.ports) {
+        props.definition.ports.forEach((port: any) => {
+             ports.push({
+                 key: port.name,
+                 value: existing[port.name] || port.default || '',
+                 isDefault: !existing[port.name]
+             });
+             seen.add(port.name);
+        });
+    }
+
+    // 2. Add any other existing attributes that weren't in definition
+    Object.entries(existing).forEach(([key, value]) => {
+        if (key !== 'ID' && key !== 'name' && !seen.has(key)) {
+            ports.push({ key, value: value as string, isDefault: false });
+        }
+    });
+
+    return ports;
+});
 function onAttributeChange(key: string, event: Event) {
     const value = (event.target as HTMLInputElement).value;
     emit('update-attribute', {

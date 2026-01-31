@@ -92,6 +92,12 @@ export class BehaviorTreePreviewManager {
                 case 'reorder_children':
                     this.handleReorderChildren(uri, message.parentId, message.newOrder);
                     break;
+                case 'loadLibrary':
+                    this.handleLoadLibrary(panel);
+                    break;
+                case 'rename_node':
+                    this.handleRenameNode(uri, message.id, message.newName);
+                    break;
             }
         });
 
@@ -317,6 +323,26 @@ export class BehaviorTreePreviewManager {
 
         } catch (e: any) {
             vscode.window.showErrorMessage(`Error starting bridge: ${e.message}`);
+        }
+    }
+
+    private handleRenameNode(uri: vscode.Uri, id: string, newName: string) {
+        const filePath = uri.fsPath;
+        if (!fs.existsSync(filePath)) return;
+
+        const content = fs.readFileSync(filePath, 'utf8');
+        const doc = new DOMParser().parseFromString(content, 'text/xml');
+
+        const node = this.findElementByPath(doc.documentElement, id);
+        if (node) {
+            node.setAttribute('name', newName); // Standard BT attribute for display name
+            this.saveXml(filePath, doc);
+
+            // Force update
+            const panel = this._previews.get(uri.toString());
+            if (panel) {
+                this.updateWebviewWithContent(panel, this.formatXml(doc), path.dirname(filePath));
+            }
         }
     }
 
@@ -606,6 +632,31 @@ export class BehaviorTreePreviewManager {
             }
         } else {
             vscode.window.showErrorMessage(`Could not find node with path: ${nodeId}`);
+        }
+    }
+
+    private async handleLoadLibrary(panel: vscode.WebviewPanel) {
+        const uris = await vscode.window.showOpenDialog({
+            canSelectMany: false,
+            openLabel: 'Load Library',
+            filters: {
+                'XML Files': ['xml'],
+                'All Files': ['*']
+            }
+        });
+
+        if (uris && uris.length > 0) {
+            const uri = uris[0];
+            try {
+                const content = fs.readFileSync(uri.fsPath, 'utf8');
+                panel.webview.postMessage({
+                    type: 'library_loaded',
+                    xml: content
+                });
+                vscode.window.showInformationMessage(`Loaded library: ${path.basename(uri.fsPath)}`);
+            } catch (e: any) {
+                vscode.window.showErrorMessage(`Failed to load library: ${e.message}`);
+            }
         }
     }
 
