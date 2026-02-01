@@ -18,6 +18,11 @@ const statusColor = computed(() => {
     return 'transparent';
 });
 
+const isLeaf = computed(() => {
+    const type = (props.data?.type || '').toLowerCase();
+    return type === 'action' || type === 'condition';
+});
+
 const iconSvg = computed(() => {
     const label = (props.data?.label || '').toLowerCase();
     const type = (props.data?.type || '').toLowerCase();

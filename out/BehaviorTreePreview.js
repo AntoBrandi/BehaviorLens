@@ -331,10 +331,11 @@ class BehaviorTreePreviewManager {
         }
         // Create Node
         // Use provided ID if available, else generate
-        const id = providedId || `${nodeType}_${Date.now()}`;
+        // Ensure even backend-generated fallback IDs are transient
+        const id = providedId || `_tmp_${nodeType}_${Date.now()}`;
         const newNode = doc.createElement(nodeType);
         newNode.setAttribute('ID', id); // Standard BT attribute
-        newNode.setAttribute('name', id);
+        // newNode.setAttribute('name', id); // Removed default name attribute as per user request
         // Append to the determined tree
         tree.appendChild(newNode);
         // Save

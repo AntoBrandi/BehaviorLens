@@ -563,8 +563,8 @@ function onDrop(event: DragEvent) {
   });
 
   // 2. Generate ID (Frontend Side)
-  // Match backend format: Type_Timestamp_Random
-  const id = `${nodeType}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+  // Match backend format: _tmp_Type_Timestamp_Random for transient IDs
+  const id = `_tmp_${nodeType}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
 
   // 3. Cache Position Immediately
   userNodePositions.value.set(id, position);
