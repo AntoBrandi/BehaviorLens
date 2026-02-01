@@ -1,6 +1,7 @@
 {
   "name": "behavior-lens",
   "displayName": "Behavior Lens",
+  "icon": "media/icon.png",
   "description": "Preview for BehaviorTree.CPP XML files",
   "version": "0.0.1",
   "engines": {
