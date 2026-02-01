@@ -72,12 +72,14 @@ const edges = ref([]);
 function onNodesChange(changes: any[]) {
     changes.forEach((change) => {
         if (change.type === 'remove') {
+            const node = nodes.value.find((n: any) => n.id === change.id);
+            if (node?.data?.isRoot) return; // Prevent deletion of Root
+
             vscode.postMessage({
                 type: 'delete_node',
                 id: change.id
             });
             // Clear from cache if deleted
-            const node = nodes.value.find((n: any) => n.id === change.id);
             if (node?.data?.xmlId) {
                 userNodePositions.value.delete(node.data.xmlId);
             }
@@ -139,7 +141,9 @@ function onEdgeContextMenu(event: any) {
 function onDeleteFromMenu() {
     if (!menu.value) return;
     if (menu.value.type === 'node') {
-        removeNodes([menu.value.id]); 
+        const node = nodes.value.find((n: any) => n.id === menu.value!.id);
+        if (node?.data?.isRoot) return; // Prevent deletion of Root
+        removeNodes([menu.value.id]);  
     } else {
         removeEdges([menu.value.id]);
     }
@@ -150,6 +154,9 @@ const editingNodeId = ref<string | null>(null);
 
 function onRenameFromMenu() {
     if (!menu.value || menu.value.type !== 'node') return;
+    const node = nodes.value.find((n: any) => n.id === menu.value!.id);
+    if (node?.data?.isRoot) return; // Prevent rename of Root
+    
     editingNodeId.value = menu.value.id;
     menu.value = null;
 }
@@ -264,7 +271,7 @@ function parseXML(text: string) {
             position: { x: 0, y: 0 } 
         });
 
-        if (parentId) {
+        if (parentId && xmlNode.getAttribute('_visual_detached') !== 'true') {
             newEdges.push({
                 id: `e${parentId}-${internalId}`,
                 source: parentId,
@@ -321,16 +328,56 @@ function parseXML(text: string) {
     }
 
     if (mainTree) {
-        // Visualize children of the Tree (skip visualizing the BehaviorTree node itself as a node)
-        // But we must use correct paths: 0-k-childIndex
+        // Create Root Node
+        const rootId = mainTree.getAttribute('ID') || 'Root';
+        newNodes.push({
+            id: rootId,
+            type: 'custom',
+            label: 'Root',
+            data: { 
+                label: 'Root', 
+                type: 'root', 
+                originalName: rootId,
+                xmlId: rootId,
+                isRoot: true,
+                attributes: getAttributes(mainTree)
+            },
+            position: { x: 0, y: 0 } 
+        });
+
+        // Visualize children of the Tree with Root as parent
         let childIndex = 0;
         for (let i = 0; i < mainTree.children.length; i++) {
             const child = mainTree.children[i];
             if (child.nodeType === 1) {
-                // Parent ID is null for top-level nodes ?? 
-                // Or do we make them roots of the graph? Yes, parentId = null.
-                buildGraph(child, `${mainTreePath}-${childIndex}`, null);
+                // Parent ID is rootId
+                buildGraph(child, `${mainTreePath}-${childIndex}`, rootId);
                 childIndex++;
+            }
+        }
+    }
+
+    // Visualize Floating Nodes (Direct children of <root> that are NOT BehaviorTree)
+    if (docRoot.tagName === 'root') {
+        const rootChildren = docRoot.children;
+        for(let i=0; i<rootChildren.length; i++) {
+            const child = rootChildren[i];
+            if (child.nodeType === 1 && child !== mainTree && child.tagName !== 'BehaviorTree') {
+                // Determine path relative to root? Or handle as separate roots?
+                // buildGraph expects a "currentPath". For root children, we can use "root-i"?
+                // Backend 'findElementByPath' might fail if we don't follow structure "0-k".
+                // Our backend 'findElementByPath' assumes Root is "0". 
+                // "0-k" is K-th child of Root.
+                // THESE nodes are children of Root.
+                // So their path IS valid: 0-i.
+                // We just need to ensure index matches XML index.
+                
+                // WAIT! buildGraph uses 'currentPath' to assign IDs if XML ID missing?
+                // No, now we use XML ID. So path is irrelevant for ID generation.
+                // It IS used for 'findElementByPath' if we used that tool, 
+                // but we rely on XML ID now.
+                
+                buildGraph(child, `0-${i}`, null); // parentId=null -> Floating
             }
         }
     }

@@ -18,6 +18,10 @@ const statusColor = computed(() => {
     return 'transparent';
 });
 
+const isRoot = computed(() => {
+    return props.data?.isRoot || props.data?.type === 'root';
+});
+
 const isLeaf = computed(() => {
     const type = (props.data?.type || '').toLowerCase();
     return type === 'action' || type === 'condition';
@@ -43,6 +47,7 @@ const iconSvg = computed(() => {
    if (type === 'condition') return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H8c0-2.21 1.79-4 4-4s4 1.79 4 4c0 .88-.36 1.68-.93 2.25z" fill="currentColor"/></svg>'; // Simple Question Mark
    if (type === 'control') return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2L2 22h20L12 2z" fill="currentColor" /></svg>'; // Default Control Triangle
    if (type === 'decorator') return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2l10 10-10 10-10-10z" fill="currentColor" /></svg>'; // Rhombus
+   if (type === 'root') return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="10" y="2" width="4" height="4" /><path d="M12 6v6 M6 12h12 M6 12v4 M18 12v4" /><rect x="4" y="16" width="4" height="4" /><rect x="16" y="16" width="4" height="4" /></svg>'; // Hierarchy/Tree Icon
    
    return '';
 });
@@ -103,11 +108,11 @@ const vFocus = {
 
 <template>
   <div class="custom-node" :class="typeClass" :style="{ borderColor: statusColor, boxShadow: statusColor !== 'transparent' ? `0 0 5px ${statusColor}` : 'none' }">
-    <Handle type="target" :position="targetPosition || Position.Top" class="handle" />
+    <Handle v-if="!isRoot" type="target" :position="targetPosition || Position.Top" class="handle" />
     
     <div class="node-content">
         <div class="icon" v-html="iconSvg"></div>
-        <div v-if="!isEditing" class="label" @dblclick="$emit('request-edit', id)">{{ data.label }}</div>
+        <div v-if="!isEditing" class="label" @dblclick="!isRoot && $emit('request-edit', id)">{{ data.label }}</div>
         <input 
             v-else
             v-focus
@@ -219,6 +224,12 @@ const vFocus = {
     border-color: #ff9800;
 }
 .custom-node.condition .icon { color: #f57c00; }
+
+.custom-node.root {
+    background: #f5f5f5; /* Light Gray */
+    border-color: #9e9e9e; /* Grey */
+}
+.custom-node.root .icon { color: #616161; }
 
 .ports {
     width: 100%;

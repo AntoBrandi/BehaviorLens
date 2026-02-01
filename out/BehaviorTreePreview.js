@@ -182,12 +182,13 @@ class BehaviorTreePreviewManager {
         if (!doc)
             return;
         const childNode = this.findNodeById(doc, childId);
-        const treeRoot = doc.getElementsByTagName('BehaviorTree')[0] || doc.documentElement;
-        if (childNode && treeRoot) {
+        // Move to root container (floating) instead of BehaviorTree
+        const container = doc.documentElement;
+        if (childNode && container) {
             if (childNode.parentNode) {
                 childNode.parentNode.removeChild(childNode);
             }
-            treeRoot.appendChild(childNode);
+            container.appendChild(childNode);
             this.saveXml(uri, doc);
             this.updateWebviewWithDoc(uri, doc);
         }
@@ -316,19 +317,8 @@ class BehaviorTreePreviewManager {
         const doc = this.getDoc(uri);
         if (!doc)
             return;
-        // Logic to determine which Tree is the "Main" one, matching frontend logic
-        let tree = null;
-        const root = doc.documentElement;
-        if (root.tagName === 'root' && root.getAttribute('main_tree_to_execute')) {
-            const mainTreeId = root.getAttribute('main_tree_to_execute');
-            const candidate = this.findNodeById(doc, mainTreeId); // Reuse findNode if possible or query selector
-            if (candidate && candidate.tagName === 'BehaviorTree') {
-                tree = candidate;
-            }
-        }
-        if (!tree) {
-            tree = doc.getElementsByTagName('BehaviorTree')[0] || doc.documentElement;
-        }
+        // Add to <root> container so it appears floating (not connected to main tree)
+        const container = doc.documentElement;
         // Create Node
         // Use provided ID if available, else generate
         // Ensure even backend-generated fallback IDs are transient
@@ -336,8 +326,13 @@ class BehaviorTreePreviewManager {
         const newNode = doc.createElement(nodeType);
         newNode.setAttribute('ID', id); // Standard BT attribute
         // newNode.setAttribute('name', id); // Removed default name attribute as per user request
-        // Append to the determined tree
-        tree.appendChild(newNode);
+        // Append to the container
+        container.appendChild(newNode);
+        // If container is NOT <root>, we are likely appending to BehaviorTree.
+        // Mark it as visually detached so frontend doesn't draw edge.
+        if (container.tagName !== 'root') {
+            newNode.setAttribute('_visual_detached', 'true');
+        }
         // Save
         this.saveXml(uri, doc);
         this.updateWebviewWithDoc(uri, doc);
@@ -436,6 +431,9 @@ class BehaviorTreePreviewManager {
             const id = el.getAttribute('ID');
             if (id && id.startsWith('_tmp_')) {
                 el.removeAttribute('ID');
+            }
+            if (el.getAttribute('_visual_detached')) {
+                el.removeAttribute('_visual_detached');
             }
             let child = node.firstChild;
             while (child) {
