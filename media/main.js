@@ -161,17 +161,33 @@ function syncState(oldNode, newNode) {
     // To be more robust: Match by ID if BOTH have ID. Else match by index.
     // But since we have the "non-unique ID" issue, Index might effectively be better for this tree structure.
 
-    const maxLen = Math.min(oldCh.length, newCh.length);
-    for (let i = 0; i < maxLen; i++) {
-        const oldC = oldCh[i];
-        const newC = newCh[i];
+    // Keep track of which old children have been matched to avoid double usage
+    const matchedOldIndices = new Set();
 
-        // Simple heuristic: if tag names match, assume same node.
-        if (oldC.data.name === newC.data.name) {
-            syncState(oldC, newC);
+    for (let i = 0; i < newCh.length; i++) {
+        const newC = newCh[i];
+        let foundIndex = -1;
+
+        // 1. Try to match by explicit ID
+        if (newC.data.id) {
+            foundIndex = oldCh.findIndex((oldC, idx) =>
+                !matchedOldIndices.has(idx) && oldC.data.id === newC.data.id
+            );
         }
-        // If they assume different structure (e.g. deletion), we stop syncing this branch 
-        // and let D3 handle exit/enter for the mismatch.
+
+        // 2. Fallback: Try to match by Name (greedy, in order)
+        // This handles the case where we just have a list of similar nodes (e.g. Sequence)
+        // and identifying them by name is the best we can do.
+        if (foundIndex === -1 && newC.data.name) {
+            foundIndex = oldCh.findIndex((oldC, idx) =>
+                !matchedOldIndices.has(idx) && oldC.data.name === newC.data.name
+            );
+        }
+
+        if (foundIndex !== -1) {
+            matchedOldIndices.add(foundIndex);
+            syncState(oldCh[foundIndex], newC);
+        }
     }
 }
 

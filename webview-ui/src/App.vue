@@ -236,7 +236,16 @@ function parseXML(text: string) {
     function buildGraph(xmlNode: Element, currentPath: string, parentId: string | null) {
         if (xmlNode.nodeType !== 1) return;
 
-        const internalId = currentPath; 
+        // internalId was path based. Now we use the XML ID.
+        // We guarantee IDs exist via the backend ensureTempIds logic.
+        // Fallback to random if something is weird, but should be stable.
+        const xmlId = xmlNode.getAttribute('ID');
+        if (!xmlId) {
+             console.error("Node missing ID:", xmlNode);
+             return; 
+        }
+
+        const internalId = xmlId; // STABLE ID
         const label = xmlNode.tagName;
         const name = xmlNode.getAttribute('name');
         const inferredType = getNodeType(label);
@@ -249,7 +258,7 @@ function parseXML(text: string) {
                 label: name || label, 
                 type: inferredType, 
                 originalName: label,
-                xmlId: xmlNode.getAttribute('ID'),
+                xmlId: xmlId,
                 attributes: getAttributes(xmlNode)
             },
             position: { x: 0, y: 0 } 
@@ -340,17 +349,22 @@ function parseXML(text: string) {
              console.log(`[Reconciliation] No cached position for ${xmlId}. Cache keys:`, [...userNodePositions.value.keys()]);
         }
 
-        // 2. If it's a detached node (root without incoming edges), stabilize it
-        const isTarget = layout.edges.some((e: any) => e.target === node.id);
-        if (!isTarget && xmlId) {
-            // Check old positions to prevent jumping
-            const oldPos = oldPositions.get(xmlId);
-            if (oldPos) {
-                 node.position = oldPos;
-                 // Promote to user position so it sticks
-                 userNodePositions.value.set(xmlId, oldPos);
-            }
+        // 2. If it's a stable node (already existed), keep its position unless it's a new layout
+        // We want to favor the 'old' position to prevent jumping.
+        // BUT, dagre calculates the *ideal* new position.
+        // If we always use oldPos, we break auto-layout for dragging significantly.
+        // However, user complains about jumping.
+        // Compromise: If we have an old position, use it. Only use Dagre for NEW nodes.
+        // For auto-layout, user can click "Layout" button which clears userNodePositions.
+        
+        const oldPos = oldPositions.get(xmlId);
+        if (oldPos) {
+             node.position = oldPos;
+             // We implicitly trust the old position until a full layout is requested
+             // userNodePositions.value.set(xmlId, oldPos); // Optional: make it sticky?
         }
+        
+        // 3. Fallback to Dagre position (already set by getLayoutedElements) if no oldPos
     });
 
     nodes.value = layout.nodes;
@@ -416,7 +430,8 @@ function parseLibraryXML(text: string) {
 
 
 onConnect((params) => {
-    addEdges({ ...params, type: 'default' });
+    console.log("[App.vue] onConnect triggered:", params);
+    // addEdges({ ...params, type: 'default' }); // Removed to prevent ghost edge. Backend handles update.
     vscode.postMessage({
         type: 'reparent_node',
          // Backend expects: sourceId = Child (Node to move), targetId = Parent (Destination)
@@ -424,6 +439,7 @@ onConnect((params) => {
         sourceId: params.target,
         targetId: params.source
     });
+    console.log("[App.vue] Sent reparent_node message:", { sourceId: params.target, targetId: params.source });
 });
 
 // Layout Graph
@@ -715,7 +731,6 @@ function onUpdateAttribute(payload: any) {
             v-model:edges="edges" 
             :fit-view-on-init="true"
             :delete-key-code="['Backspace', 'Delete']"
-            @connect="onConnect" 
             @node-drag-stop="handleNodeDragStop"
             @nodes-change="onNodesChange"
             @edges-change="onEdgesChange"

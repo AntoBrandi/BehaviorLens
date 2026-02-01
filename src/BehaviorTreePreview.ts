@@ -175,7 +175,7 @@ export class BehaviorTreePreviewManager {
         const doc = this.getDoc(uri);
         if (!doc) return;
 
-        const node = this.findElementByPath(doc.documentElement, id);
+        const node = this.findNodeById(doc, id);
         if (node && node.parentNode) {
             node.parentNode.removeChild(node);
             this.saveXml(uri, doc); // Update file (clean)
@@ -187,7 +187,7 @@ export class BehaviorTreePreviewManager {
         const doc = this.getDoc(uri);
         if (!doc) return;
 
-        const childNode = this.findElementByPath(doc.documentElement, childId);
+        const childNode = this.findNodeById(doc, childId);
         const treeRoot = doc.getElementsByTagName('BehaviorTree')[0] || doc.documentElement;
 
         if (childNode && treeRoot) {
@@ -205,8 +205,8 @@ export class BehaviorTreePreviewManager {
         const doc = this.getDoc(uri);
         if (!doc) return;
 
-        const sourceNode = this.findElementByPath(doc.documentElement, sourceId);
-        const targetNode = this.findElementByPath(doc.documentElement, targetId);
+        const sourceNode = this.findNodeById(doc, sourceId);
+        const targetNode = this.findNodeById(doc, targetId);
 
         if (sourceNode && targetNode) {
             // Check for cycles
@@ -236,14 +236,14 @@ export class BehaviorTreePreviewManager {
         const doc = this.getDoc(uri);
         if (!doc) return;
 
-        const parentNode = this.findElementByPath(doc.documentElement, parentId);
+        const parentNode = this.findNodeById(doc, parentId);
         if (!parentNode) return;
 
         // Resolve all children FIRST to avoid index invalidation during moves
         const childElements: Element[] = [];
         let valid = true;
         for (const childId of newOrder) {
-            const el = this.findElementByPath(doc.documentElement, childId);
+            const el = this.findNodeById(doc, childId);
             if (!el) {
                 valid = false;
                 break;
@@ -319,7 +319,7 @@ export class BehaviorTreePreviewManager {
         const doc = this.getDoc(uri);
         if (!doc) return;
 
-        const node = this.findElementByPath(doc.documentElement, id);
+        const node = this.findNodeById(doc, id);
         if (node) {
             node.setAttribute('name', newName); // Standard BT attribute for display name
             this.saveXml(uri, doc);
@@ -394,6 +394,8 @@ export class BehaviorTreePreviewManager {
         const uriStr = document.uri.toString();
         const currentText = document.getText();
 
+        console.log(`[Backend] updateWebview triggered for ${uriStr}`);
+
         // Assumption: If we have a cached doc, and its serialized (clean) content matches the document content,
         // then we assume it's "in sync" and we prefer our cached doc because it has the Transient IDs.
         // If content differs, user likely typed something manually, so we must re-parse.
@@ -407,9 +409,16 @@ export class BehaviorTreePreviewManager {
             if (cachedClean === currentClean) {
                 // Documents match semantically (ignoring potential whitespace differences handled by normalize/format)
                 // Use cached doc to preserve IDs
+                console.log(`[Backend] Cache HIT. content matches.`);
                 this.updateWebviewWithDoc(document.uri, cachedDoc, panel);
                 return;
+            } else {
+                console.log(`[Backend] Cache MISS. Content differs.`);
+                console.log(`[Backend] Cached (len=${cachedClean.length}): ${cachedClean.substring(0, 50)}...`);
+                console.log(`[Backend] Current (len=${currentClean.length}): ${currentClean.substring(0, 50)}...`);
             }
+        } else {
+            console.log(`[Backend] No cache found.`);
         }
 
         // Fallback: Parse fresh from text, generate NEW temp IDs
@@ -590,7 +599,7 @@ export class BehaviorTreePreviewManager {
         const doc = this.getDoc(uri);
         if (!doc) return;
 
-        const node = this.findElementByPath(doc.documentElement, nodeId);
+        const node = this.findNodeById(doc, nodeId);
         if (node) {
             node.setAttribute(attr, value);
             this.saveXml(uri, doc);
