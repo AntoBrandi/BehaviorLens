@@ -9,6 +9,7 @@ export class BehaviorTreePreviewManager {
     private static _instance: BehaviorTreePreviewManager;
 
     private readonly _previews = new Map<string, vscode.WebviewPanel>();
+    private readonly _cachedDocs = new Map<string, Document>();
     private _bridgeProcess: cp.ChildProcess | undefined;
 
     public static getInstance(extensionUri: vscode.Uri): BehaviorTreePreviewManager {
@@ -25,6 +26,8 @@ export class BehaviorTreePreviewManager {
         vscode.workspace.onDidChangeTextDocument(e => {
             const preview = this._previews.get(e.document.uri.toString());
             if (preview && preview.visible) {
+                // Determine if we should perform a full update or if it's a "clean" save
+                // Actually updateWebview handles the diff logic
                 this.updateWebview(preview, e.document);
             }
         });
@@ -55,6 +58,7 @@ export class BehaviorTreePreviewManager {
 
         panel.onDidDispose(() => {
             this._previews.delete(uri.toString());
+            this._cachedDocs.delete(uri.toString());
         });
 
         panel.onDidChangeViewState(() => {
@@ -81,7 +85,7 @@ export class BehaviorTreePreviewManager {
                     }
                     break;
                 case 'add_node':
-                    this.handleAddNode(uri, message.nodeType);
+                    this.handleAddNode(uri, message.nodeType, message.id);
                     break;
                 case 'delete_node':
                     this.handleDeleteNode(uri, message.id);
@@ -150,32 +154,38 @@ export class BehaviorTreePreviewManager {
         return currentNode;
     }
 
-    private handleDeleteNode(uri: vscode.Uri, id: string) {
+    private getDoc(uri: vscode.Uri): Document | null {
+        // Prefer cache if available to keeping IDs
+        if (this._cachedDocs.has(uri.toString())) {
+            return this._cachedDocs.get(uri.toString())!;
+        }
+
         const filePath = uri.fsPath;
-        if (!fs.existsSync(filePath)) return;
+        if (!fs.existsSync(filePath)) return null;
 
         const content = fs.readFileSync(filePath, 'utf8');
         const doc = new DOMParser().parseFromString(content, 'text/xml');
+        this.ensureTempIds(doc.documentElement);
+        this._cachedDocs.set(uri.toString(), doc);
+        return doc;
+    }
+
+
+    private handleDeleteNode(uri: vscode.Uri, id: string) {
+        const doc = this.getDoc(uri);
+        if (!doc) return;
 
         const node = this.findElementByPath(doc.documentElement, id);
         if (node && node.parentNode) {
             node.parentNode.removeChild(node);
-            this.saveXml(filePath, doc);
-
-            // Force update
-            const panel = this._previews.get(uri.toString());
-            if (panel) {
-                this.updateWebviewWithContent(panel, this.formatXml(doc), path.dirname(filePath));
-            }
+            this.saveXml(uri, doc); // Update file (clean)
+            this.updateWebviewWithDoc(uri, doc); // Update view (with IDs)
         }
     }
 
     private handleDeleteEdge(uri: vscode.Uri, childId: string) {
-        const filePath = uri.fsPath;
-        if (!fs.existsSync(filePath)) return;
-
-        const content = fs.readFileSync(filePath, 'utf8');
-        const doc = new DOMParser().parseFromString(content, 'text/xml');
+        const doc = this.getDoc(uri);
+        if (!doc) return;
 
         const childNode = this.findElementByPath(doc.documentElement, childId);
         const treeRoot = doc.getElementsByTagName('BehaviorTree')[0] || doc.documentElement;
@@ -186,22 +196,14 @@ export class BehaviorTreePreviewManager {
             }
             treeRoot.appendChild(childNode);
 
-            this.saveXml(filePath, doc);
-
-            // Force update
-            const panel = this._previews.get(uri.toString());
-            if (panel) {
-                this.updateWebviewWithContent(panel, this.formatXml(doc), path.dirname(filePath));
-            }
+            this.saveXml(uri, doc);
+            this.updateWebviewWithDoc(uri, doc);
         }
     }
 
     private handleMoveNode(uri: vscode.Uri, sourceId: string, targetId: string) {
-        const filePath = uri.fsPath;
-        if (!fs.existsSync(filePath)) return;
-
-        const content = fs.readFileSync(filePath, 'utf8');
-        const doc = new DOMParser().parseFromString(content, 'text/xml');
+        const doc = this.getDoc(uri);
+        if (!doc) return;
 
         const sourceNode = this.findElementByPath(doc.documentElement, sourceId);
         const targetNode = this.findElementByPath(doc.documentElement, targetId);
@@ -223,24 +225,16 @@ export class BehaviorTreePreviewManager {
                 sourceNode.parentNode.removeChild(sourceNode);
             }
             targetNode.appendChild(sourceNode);
-            this.saveXml(filePath, doc);
-
-            // Force update
-            const panel = this._previews.get(uri.toString());
-            if (panel) {
-                this.updateWebviewWithContent(panel, this.formatXml(doc), path.dirname(filePath));
-            }
+            this.saveXml(uri, doc);
+            this.updateWebviewWithDoc(uri, doc);
         } else {
             console.warn(`Could not find source ${sourceId} or target ${targetId} for move`);
         }
     }
 
     private handleReorderChildren(uri: vscode.Uri, parentId: string, newOrder: string[]) {
-        const filePath = uri.fsPath;
-        if (!fs.existsSync(filePath)) return;
-
-        const content = fs.readFileSync(filePath, 'utf8');
-        const doc = new DOMParser().parseFromString(content, 'text/xml');
+        const doc = this.getDoc(uri);
+        if (!doc) return;
 
         const parentNode = this.findElementByPath(doc.documentElement, parentId);
         if (!parentNode) return;
@@ -266,13 +260,8 @@ export class BehaviorTreePreviewManager {
             });
 
 
-            this.saveXml(filePath, doc);
-
-            // Force update
-            const panel = this._previews.get(uri.toString());
-            if (panel) {
-                this.updateWebviewWithContent(panel, this.formatXml(doc), path.dirname(filePath));
-            }
+            this.saveXml(uri, doc);
+            this.updateWebviewWithDoc(uri, doc);
         }
     }
 
@@ -327,22 +316,14 @@ export class BehaviorTreePreviewManager {
     }
 
     private handleRenameNode(uri: vscode.Uri, id: string, newName: string) {
-        const filePath = uri.fsPath;
-        if (!fs.existsSync(filePath)) return;
-
-        const content = fs.readFileSync(filePath, 'utf8');
-        const doc = new DOMParser().parseFromString(content, 'text/xml');
+        const doc = this.getDoc(uri);
+        if (!doc) return;
 
         const node = this.findElementByPath(doc.documentElement, id);
         if (node) {
             node.setAttribute('name', newName); // Standard BT attribute for display name
-            this.saveXml(filePath, doc);
-
-            // Force update
-            const panel = this._previews.get(uri.toString());
-            if (panel) {
-                this.updateWebviewWithContent(panel, this.formatXml(doc), path.dirname(filePath));
-            }
+            this.saveXml(uri, doc);
+            this.updateWebviewWithDoc(uri, doc);
         }
     }
 
@@ -355,12 +336,9 @@ export class BehaviorTreePreviewManager {
     }
 
 
-    private handleAddNode(uri: vscode.Uri, nodeType: string) {
-        const filePath = uri.fsPath;
-        if (!fs.existsSync(filePath)) return;
-
-        const content = fs.readFileSync(filePath, 'utf8');
-        const doc = new DOMParser().parseFromString(content, 'text/xml');
+    private handleAddNode(uri: vscode.Uri, nodeType: string, providedId?: string) {
+        const doc = this.getDoc(uri);
+        if (!doc) return;
 
         // Logic to determine which Tree is the "Main" one, matching frontend logic
         let tree: Element | null = null;
@@ -379,8 +357,8 @@ export class BehaviorTreePreviewManager {
         }
 
         // Create Node
-        // Generate ID
-        const id = `${nodeType}_${Date.now()}`;
+        // Use provided ID if available, else generate
+        const id = providedId || `${nodeType}_${Date.now()}`;
         const newNode = doc.createElement(nodeType);
         newNode.setAttribute('ID', id); // Standard BT attribute
         newNode.setAttribute('name', id);
@@ -389,13 +367,8 @@ export class BehaviorTreePreviewManager {
         tree.appendChild(newNode);
 
         // Save
-        this.saveXml(filePath, doc);
-
-        // Force update
-        const panel = this._previews.get(uri.toString());
-        if (panel) {
-            this.updateWebviewWithContent(panel, this.formatXml(doc), path.dirname(filePath));
-        }
+        this.saveXml(uri, doc);
+        this.updateWebviewWithDoc(uri, doc);
     }
 
     // Helper to find node by XML ID attribute (for finding the Tree itself)
@@ -417,46 +390,129 @@ export class BehaviorTreePreviewManager {
     }
 
     private updateWebview(panel: vscode.WebviewPanel, document: vscode.TextDocument) {
-        this.updateWebviewWithContent(panel, document.getText(), path.dirname(document.uri.fsPath));
+        const uriStr = document.uri.toString();
+        const currentText = document.getText();
+
+        // Assumption: If we have a cached doc, and its serialized (clean) content matches the document content,
+        // then we assume it's "in sync" and we prefer our cached doc because it has the Transient IDs.
+        // If content differs, user likely typed something manually, so we must re-parse.
+
+        if (this._cachedDocs.has(uriStr)) {
+            const cachedDoc = this._cachedDocs.get(uriStr)!;
+            // Clone before format to avoid mutation
+            const cachedClean = this.formatXml(cachedDoc, true); // true = clean IDs
+            const currentClean = this.normalizeXml(currentText);
+
+            if (cachedClean === currentClean) {
+                // Documents match semantically (ignoring potential whitespace differences handled by normalize/format)
+                // Use cached doc to preserve IDs
+                this.updateWebviewWithDoc(document.uri, cachedDoc, panel);
+                return;
+            }
+        }
+
+        // Fallback: Parse fresh from text, generate NEW temp IDs
+        const doc = new DOMParser().parseFromString(currentText, 'text/xml');
+        this.ensureTempIds(doc.documentElement);
+        this._cachedDocs.set(uriStr, doc);
+        this.updateWebviewWithDoc(document.uri, doc, panel);
     }
 
-    private updateWebviewWithContent(panel: vscode.WebviewPanel, content: string, rootPath: string) {
-        const processedXml = this.processXml(content, rootPath);
-        panel.webview.postMessage({
+    private normalizeXml(content: string): string {
+        // Parse and re-format to create a canonical string for comparison
+        try {
+            const doc = new DOMParser().parseFromString(content, 'text/xml');
+            // We do NOT ensure IDs here, we just want to strip whitespace and print
+            this.stripWhitespace(doc.documentElement);
+            return '<?xml version="1.0"?>\n' + this.prettyPrint(doc.documentElement, 0);
+        } catch (e) {
+            return content.trim(); // Fallback
+        }
+    }
+
+    private updateWebviewWithDoc(uri: vscode.Uri, doc: Document, panel?: vscode.WebviewPanel) {
+        const p = panel || this._previews.get(uri.toString());
+        if (!p) return;
+
+        // Send the doc WITH IDs to the webview
+        // We need to process includes as well
+        // Serialize first? processXmlWithDoc expects doc, but it will clone it.
+        const processedDoc = this.processXmlWithDoc(doc, path.dirname(uri.fsPath));
+
+        p.webview.postMessage({
             type: 'update',
-            text: processedXml,
+            text: new XMLSerializer().serializeToString(processedDoc),
         });
     }
 
-    private saveXml(filePath: string, doc: Document) {
-        const content = this.formatXml(doc);
-        fs.writeFileSync(filePath, content);
+    private saveXml(uri: vscode.Uri, doc: Document) {
+        // Format XML strips IDs if passed true (or handled internally)
+        // usage: formatXml(doc, true) -> clean
+
+        // We need deep clone to avoid modifying the cached doc
+        const clone = doc.cloneNode(true) as Document;
+
+        // Clean IDs from clone
+        this.cleanTempIds(clone.documentElement);
+
+        // formatXml(..., false) because cleaning is done manually
+        const content = this.formatXml(clone, false);
+        fs.writeFileSync(uri.fsPath, content);
     }
 
-    private formatXml(doc: Document): string {
-        // Ensure all nodes have IDs for stability
-        this.ensureIds(doc.documentElement);
-        // Strip whitespace text nodes first to avoid double indenting
-        this.stripWhitespace(doc.documentElement);
-        return '<?xml version="1.0"?>\n' + this.prettyPrint(doc.documentElement, 0);
-    }
-
-    private ensureIds(node: Node) {
-        if (node.nodeType === 1) { // Element
+    private cleanTempIds(node: Node) {
+        if (node.nodeType === 1) {
             const el = node as Element;
-            if (!el.getAttribute('ID')) {
-                const id = `${el.tagName}_${Math.random().toString(36).substr(2, 9)}`;
-                el.setAttribute('ID', id);
+            const id = el.getAttribute('ID');
+            if (id && id.startsWith('_tmp_')) {
+                el.removeAttribute('ID');
             }
-
-
             let child = node.firstChild;
             while (child) {
-                this.ensureIds(child);
+                this.cleanTempIds(child);
                 child = child.nextSibling;
             }
         }
     }
+
+    private ensureTempIds(node: Node) {
+        if (node.nodeType === 1) { // Element
+            const el = node as Element;
+            if (!el.getAttribute('ID')) {
+                // Generate a TEMP id
+                const id = `_tmp_${el.tagName}_${Math.random().toString(36).substr(2, 9)}`;
+                el.setAttribute('ID', id);
+            }
+            let child = node.firstChild;
+            while (child) {
+                this.ensureTempIds(child);
+                child = child.nextSibling;
+            }
+        }
+    }
+
+    private formatXml(doc: Document, clean: boolean): string {
+        // If clean is requested, we should remove _tmp_ IDs. 
+        // But saveXml usually does that on a clone. 
+        // normalizeXml uses this too.
+
+        if (clean) {
+            // Operates on provided node (could be clone or original)
+            // BEWARE: if original, it mutates.
+            // normalizeXml passes a fresh doc.
+            // updateWebview calls formatXml(cachedDoc, true) -> THIS MUTATES CACHED DOC!
+            // FIX: Clone before formatting if clean=true
+            const clone = doc.cloneNode(true) as Document;
+            this.cleanTempIds(clone.documentElement);
+            this.stripWhitespace(clone.documentElement);
+            return '<?xml version="1.0"?>\n' + this.prettyPrint(clone.documentElement, 0);
+        }
+
+        // Helper that works on the node provided
+        this.stripWhitespace(doc.documentElement);
+        return '<?xml version="1.0"?>\n' + this.prettyPrint(doc.documentElement, 0);
+    }
+
 
     private stripWhitespace(node: Node) {
         let child = node.firstChild;
@@ -505,7 +561,7 @@ export class BehaviorTreePreviewManager {
                     }
                     str += `${indent}</${el.tagName}>`;
                 } else {
-                    // Text only content, keep inline (though usually BT nodes don't have text)
+                    // Text only content
                     for (let i = 0; i < el.childNodes.length; i++) {
                         str += el.childNodes[i].nodeValue || '';
                     }
@@ -519,22 +575,34 @@ export class BehaviorTreePreviewManager {
         return '';
     }
 
-    private processXml(content: string, rootPath: string): string {
+    private processXmlWithDoc(doc: Document, rootPath: string): Document {
+        const clone = doc.cloneNode(true) as Document;
         try {
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(content, 'text/xml');
-
-            // Check for parsing errors
-            const parserError = doc.getElementsByTagName("parsererror");
-            if (parserError.length > 0) {
-                return content; // Fallback to raw content so client can show error
-            }
-
-            this.expandIncludes(doc, rootPath, false);
-            return new XMLSerializer().serializeToString(doc);
+            this.expandIncludes(clone, rootPath, false);
         } catch (e) {
-            console.error('Error processing XML includes:', e);
-            return content;
+            console.error("Error expanding", e);
+        }
+        return clone;
+    }
+
+    private handleEditAttribute(uri: vscode.Uri, nodeId: string, attr: string, value: string) {
+        const doc = this.getDoc(uri);
+        if (!doc) return;
+
+        const node = this.findElementByPath(doc.documentElement, nodeId);
+        if (node) {
+            node.setAttribute(attr, value);
+            this.saveXml(uri, doc);
+
+            // Force update
+            // Wait, we need to update webview too.
+            this.updateWebviewWithDoc(uri, doc);
+
+            // Re-open/update editor too? 
+            // vscode.workspace.openTextDocument(uri)...? 
+            // saveXml writes to file, so editor updates automatically.
+        } else {
+            vscode.window.showErrorMessage(`Could not find node with path: ${nodeId}`);
         }
     }
 
@@ -607,31 +675,6 @@ export class BehaviorTreePreviewManager {
                     console.warn(`Failed to read/parse included file ${newPath}`, e);
                 }
             }
-        }
-    }
-
-
-    private handleEditAttribute(uri: vscode.Uri, nodeId: string, attr: string, value: string) {
-        const filePath = uri.fsPath;
-        if (!fs.existsSync(filePath)) return;
-
-        const content = fs.readFileSync(filePath, 'utf8');
-        const doc = new DOMParser().parseFromString(content, 'text/xml');
-
-
-
-        const node = this.findElementByPath(doc.documentElement, nodeId);
-        if (node) {
-            node.setAttribute(attr, value);
-            this.saveXml(filePath, doc);
-
-            // Force update
-            const panel = this._previews.get(uri.toString());
-            if (panel) {
-                vscode.workspace.openTextDocument(uri).then(doc => this.updateWebview(panel, doc));
-            }
-        } else {
-            vscode.window.showErrorMessage(`Could not find node with path: ${nodeId}`);
         }
     }
 

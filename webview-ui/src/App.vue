@@ -64,7 +64,7 @@ const libraryGroups = computed(() => {
 });
 
 // Vue Flow
-const { onConnect, addEdges, onNodeDragStop, fitView, setNodes, setEdges, applyNodeChanges, applyEdgeChanges, removeNodes, removeEdges } = useVueFlow();
+const { onConnect, addEdges, onNodeDragStop, fitView, setNodes, setEdges, applyNodeChanges, applyEdgeChanges, removeNodes, removeEdges, project } = useVueFlow();
 const nodes = ref([]);
 const edges = ref([]);
 
@@ -146,27 +146,37 @@ function onDeleteFromMenu() {
     menu.value = null;
 }
 
+const editingNodeId = ref<string | null>(null);
+
 function onRenameFromMenu() {
     if (!menu.value || menu.value.type !== 'node') return;
-    const nodeId = menu.value.id;
-    const node = nodes.value.find((n: any) => n.id === nodeId);
-    if (!node) return;
-
-    const currentName = node.data.label || node.label;
-    const newName = prompt("Enter new name for node:", currentName);
-    
-    if (newName && newName !== currentName) {
-        // Optimistic update
-        node.data.label = newName;
-        node.label = newName;
-        
-        vscode.postMessage({
-            type: 'rename_node',
-            id: nodeId,
-            newName: newName
-        });
-    }
+    editingNodeId.value = menu.value.id;
     menu.value = null;
+}
+
+function onSaveLabel(payload: { nodeId: string, newLabel: string }) {
+    const node = nodes.value.find((n: any) => n.id === payload.nodeId);
+    if (node) {
+        if (node.data.label !== payload.newLabel) {
+            node.data.label = payload.newLabel;
+            node.label = payload.newLabel;
+            
+            vscode.postMessage({
+                type: 'rename_node',
+                id: payload.nodeId,
+                newName: payload.newLabel
+            });
+        }
+    }
+    editingNodeId.value = null;
+}
+
+function onCancelEdit() {
+    editingNodeId.value = null;
+}
+
+function onRequestEdit(nodeId: string) {
+    editingNodeId.value = nodeId;
 }
 
 // Type Inference Logic
@@ -323,8 +333,11 @@ function parseXML(text: string) {
         const xmlId = node.data.xmlId;
         // 1. If user explicitly moved it, use that position
         if (xmlId && userNodePositions.value.has(xmlId)) {
+            console.log(`[Reconciliation] Found cached position for ${xmlId}:`, userNodePositions.value.get(xmlId));
             node.position = userNodePositions.value.get(xmlId);
             return;
+        } else if (xmlId) {
+             console.log(`[Reconciliation] No cached position for ${xmlId}. Cache keys:`, [...userNodePositions.value.keys()]);
         }
 
         // 2. If it's a detached node (root without incoming edges), stabilize it
@@ -394,6 +407,7 @@ function parseLibraryXML(text: string) {
     // Usually standard nodes are always available.
     // Let's merge with standard set.
     // Merge with existing library
+    // Merge with existing library
     nodeLibrary.value = {
         ...nodeLibrary.value,
         ...newLibrary
@@ -422,7 +436,12 @@ const nodeHeight = 36;
 // Helper to count visible attributes
 function countAttributes(attributes: any) {
     if (!attributes) return 0;
-    return Object.keys(attributes).filter(k => k !== 'ID' && k !== 'name').length;
+    try {
+        return Object.keys(attributes).filter(k => k !== 'ID' && k !== 'name').length;
+    } catch (e) {
+        console.error("Error counting attributes:", e);
+        return 0;
+    }
 }
 
 function getLayoutedElements(nodes: any[], edges: any[], direction = 'TB') {
@@ -442,6 +461,7 @@ function getLayoutedElements(nodes: any[], edges: any[], direction = 'TB') {
     }
     dagreGraph.setNode(node.id, { width: nodeWidth, height: height });
   });
+//...
 
   edges.forEach((edge) => {
     dagreGraph.setEdge(edge.source, edge.target);
@@ -486,7 +506,17 @@ function handleNodeDragStop(event: any) {
     const siblingIds = siblingEdges.map((e: any) => e.target);
     
     // 3. Get Nodes and Sort by X Position
-    const siblingNodes = nodes.value.filter((n: any) => siblingIds.includes(n.id));
+    // We must use the OLD position for non-dragged nodes, but the NEW position for the dragged node.
+    // The 'nodes.value' might not have updated the dragged node's position yet in the array reactive source? 
+    // VueFlow usually updates 'draggedNode' (event.node) with latest pos.
+    
+    const siblingNodes = nodes.value.filter((n: any) => siblingIds.includes(n.id)).map((n: any) => {
+        // If this is the dragged node, use the event's position
+        if (n.id === draggedNode.id) {
+             return { ...n, position: draggedNode.position };
+        }
+        return n;
+    });
     
     // Sort logic: Left to Right (TB) or Top to Bottom (LR)
     if (layoutDirection.value === 'LR') {
@@ -506,6 +536,7 @@ function handleNodeDragStop(event: any) {
     });
 }
 
+
 function onDragStart(event: DragEvent, nodeType: string) {
   if (event.dataTransfer) {
     event.dataTransfer.setData('application/vueflow', nodeType);
@@ -524,10 +555,27 @@ function onDrop(event: DragEvent) {
   const nodeType = event.dataTransfer?.getData('application/vueflow');
   if (!nodeType) return;
   
+  // 1. Calculate Drop Position
+  const { left, top } = (document.querySelector('.vue-flow__pane') || document.body).getBoundingClientRect();
+  const position = project({ 
+      x: event.clientX - left, 
+      y: event.clientY - top 
+  });
+
+  // 2. Generate ID (Frontend Side)
+  // Match backend format: Type_Timestamp_Random
+  const id = `${nodeType}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+
+  // 3. Cache Position Immediately
+  userNodePositions.value.set(id, position);
+
+  // 4. Send to Backend
   vscode.postMessage({
     type: 'add_node',
     nodeType: nodeType,
+    id: id // Pass the ID so backend uses it
   });
+  console.log(`[DnD] Dropped node. Generated ID: ${id}, Position:`, position);
 }
 
 // Toggle Mode
@@ -682,7 +730,11 @@ function onUpdateAttribute(payload: any) {
                     :target-position="props.targetPosition"
                     :show-ports="showPorts"
                     :definition="nodeLibrary[props.data.label] || nodeLibrary[props.data.originalName]"
+                    :is-editing="editingNodeId === props.id"
                     @update-attribute="onUpdateAttribute"
+                    @save-label="onSaveLabel"
+                    @cancel-edit="onCancelEdit"
+                    @request-edit="onRequestEdit"
                 />
             </template>
             <Background />

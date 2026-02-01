@@ -2,25 +2,52 @@
 import { Handle, Position } from '@vue-flow/core';
 import { computed } from 'vue';
 
-const props = defineProps(['id', 'data', 'sourcePosition', 'targetPosition', 'showPorts', 'definition']);
-const emit = defineEmits(['update-attribute']);
+const props = defineProps(['id', 'data', 'sourcePosition', 'targetPosition', 'showPorts', 'definition', 'isEditing']);
+const emit = defineEmits(['update-attribute', 'save-label', 'cancel-edit']);
 
 const typeClass = computed(() => {
-    return props.data.type?.toLowerCase() || 'default';
+    return (props.data?.type || 'default').toLowerCase();
 });
 
-// ... (color/icon logic unchanged) ...
+const statusColor = computed(() => {
+    if (!props.data?.status) return 'transparent';
+    const status = props.data.status.toUpperCase();
+    if (status === 'SUCCESS') return '#4caf50';
+    if (status === 'FAILURE') return '#f44336';
+    if (status === 'RUNNING') return '#ffeb3b';
+    return 'transparent';
+});
 
-// But replace attributes logic:
-const attributes = computed(() => {
+const iconSvg = computed(() => {
+    const label = (props.data?.label || '').toLowerCase();
+    const type = (props.data?.type || '').toLowerCase();
+    
+    // Specific Control Icons
+    if (label.includes('sequence') || label === 'sequence') {
+        return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M16.01 11H4v2h12.01v3L20 12l-3.99-4z" fill="currentColor"/></svg>'; // Arrow Right
+    }
+    if (label.includes('fallback') || label === 'fallback') {
+        return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H8c0-2.21 1.79-4 4-4s4 1.79 4 4c0 .88-.36 1.68-.93 2.25z" fill="currentColor"/></svg>'; // Question Mark
+    }
+    if (label.includes('parallel')) {
+        return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2v20M8 2v20M16 2v20" stroke="currentColor" stroke-width="2"/></svg>'; // Parallel lines (simplified)
+    }
+
+   // Generic Type Icons
+   if (type === 'action') return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M7 2v11h3v9l7-12h-4l4-8z" fill="currentColor"/></svg>'; // Lightning Bolt
+   if (type === 'condition') return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H8c0-2.21 1.79-4 4-4s4 1.79 4 4c0 .88-.36 1.68-.93 2.25z" fill="currentColor"/></svg>'; // Simple Question Mark
+   if (type === 'control') return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2L2 22h20L12 2z" fill="currentColor" /></svg>'; // Default Control Triangle
+   if (type === 'decorator') return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2l10 10-10 10-10-10z" fill="currentColor" /></svg>'; // Rhombus
+   
+   return '';
+});
+
+const displayedPorts = computed(() => {
+    if (!props.data) return [];
     const existing = props.data.attributes || {};
     const ports = [];
-
-    // 1. Add existing attributes (excluding ID/name)
-    // Create a map to avoid duplicates if definition also has them
     const seen = new Set<string>();
 
-    // If we have a definition, start with its ports
     if (props.definition && props.definition.ports) {
         props.definition.ports.forEach((port: any) => {
              ports.push({
@@ -32,7 +59,6 @@ const attributes = computed(() => {
         });
     }
 
-    // 2. Add any other existing attributes that weren't in definition
     Object.entries(existing).forEach(([key, value]) => {
         if (key !== 'ID' && key !== 'name' && !seen.has(key)) {
             ports.push({ key, value: value as string, isDefault: false });
@@ -41,6 +67,7 @@ const attributes = computed(() => {
 
     return ports;
 });
+
 function onAttributeChange(key: string, event: Event) {
     const value = (event.target as HTMLInputElement).value;
     emit('update-attribute', {
@@ -50,6 +77,23 @@ function onAttributeChange(key: string, event: Event) {
     });
 }
 
+function onLabelSave(e: Event) {
+    const value = (e.target as HTMLInputElement).value;
+    if (value.trim()) {
+        emit('save-label', { nodeId: props.id, newLabel: value.trim() });
+    } else {
+        emit('cancel-edit');
+    }
+}
+
+function onLabelCancel() {
+    emit('cancel-edit');
+}
+
+// Focus directive
+const vFocus = {
+  mounted: (el: HTMLInputElement) => el.focus()
+}
 </script>
 
 <template>
@@ -58,11 +102,22 @@ function onAttributeChange(key: string, event: Event) {
     
     <div class="node-content">
         <div class="icon" v-html="iconSvg"></div>
-        <div class="label">{{ data.label }}</div>
+        <div v-if="!isEditing" class="label" @dblclick="$emit('request-edit', id)">{{ data.label }}</div>
+        <input 
+            v-else
+            v-focus
+            class="label-input"
+            type="text"
+            :value="data.label"
+            @blur="onLabelSave"
+            @keydown.enter="onLabelSave"
+            @keydown.escape="onLabelCancel"
+            @mousedown.stop
+        />
     </div>
 
-    <div class="ports" v-if="showPorts && attributes.length > 0">
-        <div v-for="attr in attributes" :key="attr.key" class="port-item">
+    <div class="ports" v-if="showPorts && displayedPorts && displayedPorts.length > 0">
+        <div v-for="attr in displayedPorts" :key="attr.key" class="port-item">
             <span class="port-label">{{ attr.key }}:</span>
             <input 
                 type="text" 
@@ -113,6 +168,20 @@ function onAttributeChange(key: string, event: Event) {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.label-input {
+    flex: 1;
+    font-family: inherit;
+    font-size: inherit;
+    font-weight: 600;
+    text-align: center;
+    border: 1px solid #2196f3;
+    border-radius: 2px;
+    padding: 0 4px;
+    outline: none;
+    background: rgba(255, 255, 255, 0.9);
+    width: 60px; /* Min width */
 }
 
 .handle {
