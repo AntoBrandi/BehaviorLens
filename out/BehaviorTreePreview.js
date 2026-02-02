@@ -80,9 +80,7 @@ class BehaviorTreePreviewManager {
                 case 'editAttribute':
                     this.handleEditAttribute(uri, message.nodeId, message.attr, message.value);
                     break;
-                case 'reparent_node':
-                    this.handleMoveNode(uri, message.sourceId, message.targetId);
-                    break;
+                // case 'reparent_node' removed: duplicate, handled below
                 case 'switchMode':
                     if (message.mode === 'inspection') {
                         this.startInspectionMode(panel);
@@ -126,7 +124,23 @@ class BehaviorTreePreviewManager {
             this._previews.delete(uri.toString());
         });
     }
-    // Helper to find node by Structural Path ID (e.g., "0-1-3")
+    findNodeSmart(doc, id) {
+        // 1. Try Path-based resolution (Composite ID: "XMLID#Path")
+        if (id.includes('#')) {
+            const parts = id.split('#');
+            // parts[0] is XML ID, parts[1] is Path
+            if (parts.length > 1) {
+                const pathStr = parts[1];
+                const node = this.findElementByPath(doc.documentElement, pathStr);
+                if (node)
+                    return node;
+            }
+        }
+        // 2. Fallback: Search by ID attribute
+        // If the ID is composite but path failed (topology changed?), try finding by the XML ID part
+        const cleanId = id.includes('#') ? id.split('#')[0] : id;
+        return this.findNodeById(doc, cleanId);
+    }
     // "0" is root. "0-1" is 2nd child of root.
     findElementByPath(root, pathStr) {
         // Root is "0"
@@ -178,7 +192,10 @@ class BehaviorTreePreviewManager {
         const doc = this.getDoc(uri);
         if (!doc)
             return;
-        const node = this.findNodeById(doc, id);
+        let node = this.findNodeByUuid(doc, id);
+        if (!node) {
+            node = this.findNodeSmart(doc, id);
+        }
         if (node && node.parentNode) {
             node.parentNode.removeChild(node);
             this.saveXml(uri, doc); // Update file (clean)
@@ -189,9 +206,27 @@ class BehaviorTreePreviewManager {
         const doc = this.getDoc(uri);
         if (!doc)
             return;
-        const childNode = this.findNodeById(doc, childId);
-        const parentNode = this.findNodeById(doc, parentId);
+        let childNode = this.findNodeByUuid(doc, childId);
+        if (!childNode)
+            childNode = this.findNodeSmart(doc, childId);
+        let parentNode = this.findNodeByUuid(doc, parentId);
+        if (!parentNode)
+            parentNode = this.findNodeSmart(doc, parentId);
         if (childNode && parentNode) {
+            // Check for cycles (e.g. reparenting a node to its own descendant)
+            let check = parentNode;
+            let cycle = false;
+            while (check) {
+                if (check === childNode) {
+                    cycle = true;
+                    break;
+                }
+                check = check.parentNode;
+            }
+            if (cycle) {
+                console.warn(`[Backend] Cycle detected. Cannot reparent ${childId} to ${parentId}`);
+                return;
+            }
             // Remove from old parent
             if (childNode.parentNode) {
                 childNode.parentNode.removeChild(childNode);
@@ -213,7 +248,9 @@ class BehaviorTreePreviewManager {
         const doc = this.getDoc(uri);
         if (!doc)
             return;
-        const childNode = this.findNodeById(doc, childId);
+        let childNode = this.findNodeByUuid(doc, childId);
+        if (!childNode)
+            childNode = this.findNodeById(doc, childId);
         // Move to root container (floating) instead of BehaviorTree
         const container = doc.documentElement;
         if (childNode && container) {
@@ -259,15 +296,24 @@ class BehaviorTreePreviewManager {
         const doc = this.getDoc(uri);
         if (!doc)
             return;
-        const parentNode = this.findNodeById(doc, parentId);
-        if (!parentNode)
+        let foundParent = this.findNodeByUuid(doc, parentId);
+        if (!foundParent)
+            foundParent = this.findNodeSmart(doc, parentId);
+        if (!foundParent) {
+            console.warn(`[Backend] Reorder failed. Parent ${parentId} not found.`);
             return;
+        }
+        const parentNode = foundParent;
         // Resolve all children FIRST to avoid index invalidation during moves
         const childElements = [];
         let valid = true;
         for (const childId of newOrder) {
-            const el = this.findNodeById(doc, childId);
+            let el = this.findNodeByUuid(doc, childId);
+            if (!el)
+                el = this.findNodeSmart(doc, childId);
             if (!el) {
+                // If a node is missing, we shouldn't reorder partially as it might destroy the tree structure
+                console.warn(`[Backend] Reorder child not found: ${childId}`);
                 valid = false;
                 break;
             }
@@ -275,9 +321,19 @@ class BehaviorTreePreviewManager {
         }
         if (valid) {
             // Re-append in new order
+            // This effectively moves them to the end, but since we do it for ALL children in order,
+            // they will be sorted correctly.
+            // Note: If there are other children NOT in newOrder (e.g. comments, or filtered nodes), 
+            // they will remain at the top (if we traverse) or be jumped over?
+            // appendChild moves the node.
             childElements.forEach(el => {
+                // Ensure we are only moving actual children of the parent
+                // (Though findNodeSmart might find them anywhere, logic implies they are siblings)
                 if (el.parentNode === parentNode) {
                     parentNode.appendChild(el);
+                }
+                else {
+                    console.warn(`[Backend] Reorder child ${el.getAttribute('ID')} is not a child of target parent.`);
                 }
             });
             this.saveXml(uri, doc);
@@ -399,7 +455,9 @@ class BehaviorTreePreviewManager {
         const doc = this.getDoc(uri);
         if (!doc)
             return;
-        const node = this.findNodeById(doc, id);
+        let node = this.findNodeByUuid(doc, id);
+        if (!node)
+            node = this.findNodeById(doc, id);
         if (node) {
             node.setAttribute('name', newName); // Standard BT attribute for display name
             this.saveXml(uri, doc);
@@ -445,6 +503,23 @@ class BehaviorTreePreviewManager {
             if (!node)
                 continue;
             if (node.getAttribute && node.getAttribute('ID') === id) {
+                return node;
+            }
+            for (let i = 0; i < node.childNodes.length; i++) {
+                if (node.childNodes[i].nodeType === 1) {
+                    queue.push(node.childNodes[i]);
+                }
+            }
+        }
+        return null;
+    }
+    findNodeByUuid(doc, uuid) {
+        const queue = [doc.documentElement];
+        while (queue.length > 0) {
+            const node = queue.shift();
+            if (!node)
+                continue;
+            if (node.getAttribute && node.getAttribute('_uuid') === uuid) {
                 return node;
             }
             for (let i = 0; i < node.childNodes.length; i++) {
@@ -535,6 +610,9 @@ class BehaviorTreePreviewManager {
             if (el.getAttribute('_visual_detached')) {
                 el.removeAttribute('_visual_detached');
             }
+            if (el.getAttribute('_uuid')) {
+                el.removeAttribute('_uuid');
+            }
             let child = node.firstChild;
             while (child) {
                 this.cleanTempIds(child);
@@ -549,6 +627,10 @@ class BehaviorTreePreviewManager {
                 // Generate a TEMP id
                 const id = `_tmp_${el.tagName}_${Math.random().toString(36).substr(2, 9)}`;
                 el.setAttribute('ID', id);
+            }
+            if (!el.getAttribute('_uuid')) {
+                const uuid = Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
+                el.setAttribute('_uuid', uuid);
             }
             let child = node.firstChild;
             while (child) {
@@ -650,7 +732,9 @@ class BehaviorTreePreviewManager {
         const doc = this.getDoc(uri);
         if (!doc)
             return;
-        const node = this.findNodeById(doc, nodeId);
+        let node = this.findNodeByUuid(doc, nodeId);
+        if (!node)
+            node = this.findNodeById(doc, nodeId);
         if (node) {
             node.setAttribute(attr, value);
             this.saveXml(uri, doc);

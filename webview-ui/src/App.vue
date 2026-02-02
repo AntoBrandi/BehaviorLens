@@ -19,6 +19,7 @@ const treeDefinitions = ref<Map<string, Element>>(new Map());
 const showExpandMenu = ref(false);
 const subTreeToExpand = ref<string | null>(null);
 const rosTopic = ref('/behavior_tree_log');
+const expandedSubTreeIds = ref(new Set<string>());
 
 function updateTopic() {
     vscode.postMessage({
@@ -89,15 +90,18 @@ function onNodesChange(changes: any[]) {
             const node = nodes.value.find((n: any) => n.id === change.id);
             if (node?.data?.isRoot) return; // Prevent deletion of Root
 
-            // If ID is composite (ID#Path), use data.xmlId or extract it
-            const xmlId = node?.data?.xmlId || change.id.split('#')[0];
+            // If ID is composite (ID#Path), use data.uuid (preferred) or node.id (Composite ID) to ensure uniqueness
+            // node.id is already the Composite ID (XMLID#Path) which backend understands via findNodeSmart
+            const idToSend = node?.data?.uuid || change.id;
             
             vscode.postMessage({
                 type: 'delete_node',
-                id: xmlId
+                id: idToSend
             });
             // Clear from cache if deleted
-            if (node?.data?.xmlId) {
+            if (node?.data?.uuid) {
+                userNodePositions.value.delete(node.data.uuid);
+            } else if (node?.data?.xmlId) {
                 userNodePositions.value.delete(node.data.xmlId);
             }
         }
@@ -109,11 +113,11 @@ function onEdgesChange(changes: any[]) {
             const edge = edges.value.find((e: any) => e.id === change.id);
             if (edge) {
                 const targetNode = nodes.value.find((n: any) => n.id === edge.target);
-                const xmlId = targetNode?.data?.xmlId || edge.target.split('#')[0];
+                const idToSend = targetNode?.data?.uuid || edge.target; // Composite ID fallback
 
                 vscode.postMessage({
                     type: 'delete_edge',
-                    targetId: xmlId
+                    targetId: idToSend
                 });
             }
         }
@@ -231,7 +235,7 @@ function onSaveLabel(payload: { nodeId: string, newLabel: string }) {
             
             vscode.postMessage({
                 type: 'rename_node',
-                id: node.data.xmlId || payload.nodeId.split('#')[0],
+                id: node.data.uuid || node.id,
                 newName: payload.newLabel
             });
         }
@@ -291,7 +295,12 @@ function parseXML(text: string) {
     // Capture old positions before parsing
     const oldPositions = new Map<string, {x: number, y: number}>();
     nodes.value.forEach((n: any) => {
-        if (n.data?.xmlId) {
+        if (n.data?.isExpanded) {
+            // Expanded nodes use Composite ID
+             oldPositions.set(n.id, n.position);
+        } else if (n.data?.uuid) {
+            oldPositions.set(n.data.uuid, n.position);
+        } else if (n.data?.xmlId) {
             oldPositions.set(n.data.xmlId, n.position);
         }
     });
@@ -340,6 +349,7 @@ function parseXML(text: string) {
                 type: inferredType, 
                 originalName: label,
                 xmlId: xmlId,
+                uuid: xmlNode.getAttribute('_uuid'),
                 attributes: getAttributes(xmlNode)
             },
             position: { x: 0, y: 0 } 
@@ -413,6 +423,7 @@ function parseXML(text: string) {
                 type: 'root', 
                 originalName: rootId,
                 xmlId: rootId,
+                uuid: mainTree.getAttribute('_uuid'),
                 isRoot: true,
                 attributes: getAttributes(mainTree)
             },
@@ -456,17 +467,46 @@ function parseXML(text: string) {
     
     // Position Reconciliation
     layout.nodes.forEach((node: any) => {
+        const uuid = node.data.uuid;
         const xmlId = node.data.xmlId;
+        const isExpanded = node.data.isExpanded;
+        
         // 1. If user explicitly moved it, use that position
-        if (xmlId && userNodePositions.value.has(xmlId)) {
-            console.log(`[Reconciliation] Found cached position for ${xmlId}:`, userNodePositions.value.get(xmlId));
-            node.position = userNodePositions.value.get(xmlId);
-            return;
+        
+        let cachedPos = null;
+        if (isExpanded) {
+             // For expanded nodes, ALWAYS use Composite ID (node.id)
+             if (userNodePositions.value.has(node.id)) {
+                 cachedPos = userNodePositions.value.get(node.id);
+             }
+        } else {
+            // For regular nodes, Prefer UUID
+            if (uuid && userNodePositions.value.has(uuid)) {
+                 cachedPos = userNodePositions.value.get(uuid);
+            } else if (xmlId && userNodePositions.value.has(xmlId)) {
+                 cachedPos = userNodePositions.value.get(xmlId);
+            }
         }
 
-        const oldPos = oldPositions.get(xmlId);
-        if (oldPos) {
-             node.position = oldPos;
+        if (cachedPos) {
+             node.position = cachedPos;
+             return;
+        }
+
+        // 2. Fallback to old position (from previous render)
+        if (isExpanded) {
+            if (oldPositions.has(node.id)) {
+                node.position = oldPositions.get(node.id);
+                return;
+            }
+        } else {
+            if (uuid && oldPositions.has(uuid)) {
+                 node.position = oldPositions.get(uuid);
+                 return;
+            }
+            if (xmlId && oldPositions.has(xmlId)) {
+                 node.position = oldPositions.get(xmlId);
+            }
         }
     });
 
@@ -476,6 +516,30 @@ function parseXML(text: string) {
     if (isFirstLoad.value) {
         fitView();
         isFirstLoad.value = false;
+    }
+
+    // Re-apply expansions
+    // We use a queue to handle nested expansions
+    let queue = [...nodes.value];
+    // To prevent infinite loops or redundant checks
+    const processed = new Set<string>();
+
+    while (queue.length > 0) {
+        const node = queue.shift();
+        if (!node || processed.has(node.id)) continue;
+        processed.add(node.id);
+
+        if (node.data.type === 'subtree') {
+            const shouldExpand = expandedSubTreeIds.value.has(node.id) || 
+                                (node.data.uuid && expandedSubTreeIds.value.has(node.data.uuid));
+            
+            if (shouldExpand) {
+                const newNodes = expandSubTree(node.id);
+                if (newNodes && newNodes.length > 0) {
+                    queue.push(...newNodes);
+                }
+            }
+        }
     }
 }
 
@@ -516,6 +580,8 @@ function populateGraph(xmlNode: Element, currentPath: string, parentId: string |
             type: inferredType, 
             originalName: label,
             xmlId: xmlId,
+            uuid: xmlNode.getAttribute('_uuid'),
+            isExpanded: true,
             attributes: getAttrs(xmlNode)
         },
         position: { x: 0, y: 0 } 
@@ -540,12 +606,18 @@ function populateGraph(xmlNode: Element, currentPath: string, parentId: string |
     }
 }
 
-function expandSubTree(nodeId: string) {
+function expandSubTree(nodeId: string): any[] | undefined {
     const nodeIndex = nodes.value.findIndex((n: any) => n.id === nodeId);
-    if (nodeIndex === -1) return;
+    if (nodeIndex === -1) return undefined;
     
     const subTreeNode = nodes.value[nodeIndex];
-    if (subTreeNode.data.type !== 'subtree') return;
+    if (subTreeNode.data.type !== 'subtree') return undefined;
+
+    // Track state
+    expandedSubTreeIds.value.add(nodeId);
+    if (subTreeNode.data.uuid) {
+        expandedSubTreeIds.value.add(subTreeNode.data.uuid);
+    }
     
     // Capture original position
     const originalPosition = { ...subTreeNode.position };
@@ -555,14 +627,14 @@ function expandSubTree(nodeId: string) {
     
     if (!definition) {
         console.warn(`Definition for SubTree ${treeId} not found.`);
-        return;
+        return undefined;
     }
     
     const parentEdge = edges.value.find((e: any) => e.target === nodeId);
     const parentId = parentEdge ? parentEdge.source : null;
     
     const subTreePath = nodeId.split('#')[1]; 
-    if (!subTreePath) return;
+    if (!subTreePath) return undefined;
 
     const newNodes: any[] = [];
     const newEdges: any[] = [];
@@ -575,7 +647,7 @@ function expandSubTree(nodeId: string) {
         }
     }
     
-    if (!rootChild) return;
+    if (!rootChild) return undefined;
     
     // Populate graph logic...
     populateGraph(rootChild, subTreePath, parentId, newNodes, newEdges);
@@ -602,20 +674,52 @@ function expandSubTree(nodeId: string) {
     
     const newRoot = layout.nodes.find((n: any) => n.id === newRootId);
     
-    if (!newRoot) return;
+    if (!newRoot) return undefined;
     
     // 4. Calculate Offset
     // We want newRoot.position to match originalPosition
     const offsetX = originalPosition.x - newRoot.position.x;
     const offsetY = originalPosition.y - newRoot.position.y;
     
-    // 5. Apply Offset to ALL new nodes
+    // 5. Apply Offset to ALL new nodes AND Reconcile with Cache
     layout.nodes.forEach((n: any) => {
-        n.position.x += offsetX;
-        n.position.y += offsetY;
+        const uuid = n.data.uuid;
+        const xmlId = n.data.xmlId;
+        const isExpanded = n.data.isExpanded;
+
+        // Check if we have a user-defined position for this node (moved previously)
+        // Since we re-expand, the node ID might be regenerated if path changes, 
+        // BUT uuid persists if available.
+        // We prioritize UUID check.
+        
+        let cachedPos = null;
+        if (isExpanded) {
+            // For expanded nodes, use Composite ID (node.id)
+            if (userNodePositions.value.has(n.id)) {
+                cachedPos = userNodePositions.value.get(n.id);
+            }
+        } else if (uuid && userNodePositions.value.has(uuid)) {
+            cachedPos = userNodePositions.value.get(uuid);
+        } else if (xmlId && userNodePositions.value.has(xmlId)) {
+            cachedPos = userNodePositions.value.get(xmlId);
+        }
+
+        if (cachedPos) {
+            // Restore user position
+            n.position = { ...cachedPos };
+        } else {
+            // Apply offset to auto-layout position
+            n.position.x += offsetX;
+            n.position.y += offsetY;
+        }
+        
         
         // Cache this new position so it sticks if we do a future global reconciliation (optional, but good practice)
-        if (n.data.xmlId) {
+        if (isExpanded) {
+             userNodePositions.value.set(n.id, { ...n.position });
+        } else if (n.data.uuid) {
+             userNodePositions.value.set(n.data.uuid, { ...n.position });
+        } else if (n.data.xmlId) {
              userNodePositions.value.set(n.data.xmlId, { ...n.position });
         }
     });
@@ -632,7 +736,7 @@ function expandSubTree(nodeId: string) {
     nodes.value = [...remainingNodes, ...layout.nodes];
     edges.value = [...remainingEdges, ...newEdges];
     
-    // Do NOT call global fitView or layout
+    return layout.nodes; // Return new nodes for recursion
 }
 
 function parseLibraryXML(text: string) {
@@ -711,8 +815,8 @@ function reorderChildren(parentId: string) {
         }
     });
 
-    // 4. Extract XML IDs
-    const newOrder = childrenNodes.map((n: any) => n.data.xmlId).filter((id: any) => !!id);
+    // 4. Extract UUIDs or Composite IDs
+    const newOrder = childrenNodes.map((n: any) => n.data.uuid || n.id).filter((id: any) => !!id);
 
     console.log(`[App.vue] Reordering children of ${parentId} based on ${isVertical ? 'X' : 'Y'}:`, newOrder);
 
@@ -720,10 +824,14 @@ function reorderChildren(parentId: string) {
     // Only if we define a 'reorder_children' message type in backend
     // Check BehaviorTreePreview.ts -> handleReorderChildren exists? YES.
     const parentNode = nodes.value.find((n: any) => n.id === parentId);
-    if (parentNode && parentNode.data.xmlId) {
+    
+    // Use UUID for parent if available, else Composite ID
+    const parentRealId = parentNode?.data?.uuid || parentNode?.id;
+    
+    if (parentRealId) {
         vscode.postMessage({
             type: 'reorder_children',
-            parentId: parentNode.data.xmlId,
+            parentId: parentRealId,
             newOrder: newOrder
         });
     }
@@ -736,10 +844,10 @@ onConnect((params) => {
     const sourceNode = nodes.value.find((n: any) => n.id === params.source);
     const targetNode = nodes.value.find((n: any) => n.id === params.target);
 
-    const sourceXmlId = sourceNode?.data?.xmlId || params.source.split('#')[0];
-    const targetXmlId = targetNode?.data?.xmlId || params.target.split('#')[0];
+    const sourceIdToSend = sourceNode?.data?.uuid || params.source;
+    const targetIdToSend = targetNode?.data?.uuid || params.target;
 
-    console.log("[App.vue] onConnect triggered. Raw:", params, "XmlIDs:", { source: sourceXmlId, target: targetXmlId });
+    console.log("[App.vue] onConnect triggered. Raw:", params, "IDs:", { source: sourceIdToSend, target: targetIdToSend });
    
     // Add edge locally so reorderChildren can see it immediately
     addEdges([params]);
@@ -749,8 +857,8 @@ onConnect((params) => {
          // Backend expects: sourceId = Child (Node to move), targetId = Parent (Destination)
          // Vue Flow edge: Source (Parent) -> Target (Child)
          // So we want to move params.target (Child) to params.source (Parent)
-        sourceId: targetXmlId,
-        targetId: sourceXmlId
+        sourceId: targetIdToSend,
+        targetId: sourceIdToSend
     });
 
     // Trigger reorder after a tick to allow the edge to be registered?
@@ -794,7 +902,7 @@ function countVisiblePorts(node: any) {
     // Count extra attributes not in definition
     if (attrs) {
         Object.keys(attrs).forEach(key => {
-            if (key !== 'ID' && key !== 'name' && !seen.has(key)) {
+            if (key !== 'ID' && key !== 'name' && key !== '_uuid' && !seen.has(key)) {
                 count++;
             }
         });
@@ -840,7 +948,7 @@ function getLayoutedElements(nodes: any[], edges: any[], direction = 'TB') {
             // 2. Check attributes
             if (node.data.attributes) {
                  Object.entries(node.data.attributes).forEach(([k, v]) => {
-                     if (k !== 'ID' && k !== 'name') {
+                     if (k !== 'ID' && k !== 'name' && k !== '_uuid') {
                          const lineLen = k.length + String(v).length;
                          if (lineLen > maxLineLen) maxLineLen = lineLen;
                      }
@@ -892,7 +1000,9 @@ function handleNodeDragStop(event: any) {
     if (!draggedNode) return;
 
     // Cache the new position
-    if (draggedNode.data?.xmlId) {
+    if (draggedNode.data?.uuid) {
+        userNodePositions.value.set(draggedNode.data.uuid, { ...draggedNode.position });
+    } else if (draggedNode.data?.xmlId) {
         // Store a copy to avoid reactivity issues or object mutation
         userNodePositions.value.set(draggedNode.data.xmlId, { ...draggedNode.position });
     }
@@ -969,7 +1079,22 @@ function onDrop(event: DragEvent) {
   const id = `_tmp_${nodeType}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
 
   // 3. Cache Position Immediately
-  userNodePositions.value.set(id, position);
+  userNodePositions.value.set(id, position); 
+  // NOTE: 'id' here is the Transient ID _tmp_... which will become xmlId usually.
+  // Actually, backend generates _uuid.
+  // We can't know the _uuid yet.
+  // But subsequent updates will replace this node with one from backend having _uuid.
+  // The backend's new node will have clean _uuid.
+  // This immediate cache might be lost on next update if we don't map it?
+  // Actually, the new node from backend will NOT be in 'userNodePositions' yet.
+  // But buildGraphRecursive will use 'oldPositions'.
+  // We need to ensuring the newly added node finds its position.
+  // The 'id' generated here usually matches the 'ID' attribute set by backend if we pass it?
+  // Yes: this.handleAddNode(..., id) -> backend sets ID=id.
+  
+  // So 'userNodePositions' keyed by 'id' (XMLID) works for the FIRST render.
+  // After that, we likely switch to UUID.
+  // So we should keep setting it by ID here as fallback.
 
   // 4. Send to Backend
   vscode.postMessage({
@@ -1004,8 +1129,13 @@ function toggleMode() {
 onNodeDragStop((event) => {
     // 1. Update Position Cache
     event.nodes.forEach((node) => {
-        // Use XML ID for persistence if available
-        const id = node.data?.xmlId || node.id;
+        // Use UUID for persistence if available, UNLESS expanded
+        let id;
+        if (node.data?.isExpanded) {
+             id = node.id;
+        } else {
+             id = node.data?.uuid || node.data?.xmlId || node.id;
+        }
         userNodePositions.value.set(id, { ...node.position });
         
         // 2. Trigger Reordering for Parent(s)
@@ -1157,7 +1287,7 @@ window.addEventListener('message', event => {
 
 function onUpdateAttribute(payload: any) {
     const node = nodes.value.find((n: any) => n.id === payload.nodeId);
-    const realId = node?.data?.xmlId || payload.nodeId.split('#')[0];
+    const realId = node?.data?.uuid || payload.nodeId; // Use Composite ID if UUID missing
     
     vscode.postMessage({
         type: 'editAttribute',

@@ -71,7 +71,7 @@ const displayedPorts = computed(() => {
     }
 
     Object.entries(existing).forEach(([key, value]) => {
-        if (key !== 'ID' && key !== 'name' && !seen.has(key)) {
+        if (key !== 'ID' && key !== 'name' && key !== '_uuid' && !seen.has(key)) {
             ports.push({ key, value: value as string, isDefault: false });
         }
     });
