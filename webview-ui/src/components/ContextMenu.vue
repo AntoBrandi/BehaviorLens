@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 
-const props = defineProps({
-  x: { type: Number, required: true },
-  y: { type: Number, required: true },
-  type: { type: String, required: true } // 'node' or 'edge'
-});
+const props = defineProps<{
+    x: number;
+    y: number;
+    type: 'node' | 'edge';
+    showExpand?: boolean;
+}>();
 
-const emit = defineEmits(['close', 'delete', 'rename']);
+const emit = defineEmits(['close', 'delete', 'rename', 'expand']);
 
 function onDelete() {
   emit('delete');
@@ -27,11 +28,12 @@ const style = computed(() => ({
 
 <template>
   <div class="context-menu" :style="style" @click.stop>
-    <div class="menu-item" @click="onDelete">
-      Delete {{ type }}
-    </div>
     <div class="menu-item" v-if="type === 'node'" @click="onRename">
       Rename Node
+    </div>
+    <div class="menu-item" v-if="showExpand" @click="$emit('expand')">Expand</div>
+    <div class="menu-item" @click="onDelete">
+      Delete {{ type }}
     </div>
   </div>
   <div class="context-menu-overlay" @click="$emit('close')"></div>

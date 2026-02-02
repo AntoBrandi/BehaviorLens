@@ -1,19 +1,31 @@
-import rclpy
-from rclpy.node import Node
-from nav2_msgs.msg import BehaviorTreeLog
-import json
 import sys
+import json
+import os
+
+try:
+    import rclpy
+    from rclpy.node import Node
+    from nav2_msgs.msg import BehaviorTreeLog
+except ImportError as e:
+    print(f"CRITICAL ERROR: {e}", file=sys.stderr)
+    print(f"Python Executable: {sys.executable}", file=sys.stderr)
+    print(f"System Path: {sys.path}", file=sys.stderr)
+    print(f"Environment keys: {list(os.environ.keys())}", file=sys.stderr)
+    # Check specifically for PYTHONPATH
+    print(f"PYTHONPATH: {os.environ.get('PYTHONPATH', 'NOT SET')}", file=sys.stderr)
+    sys.exit(1)
 
 class BehaviorTreeBridge(Node):
-    def __init__(self):
+    def __init__(self, topic_name):
         super().__init__('behavior_tree_vscode_bridge')
+        self.declare_parameter('topic_name', topic_name)
+        topic_name = self.get_parameter('topic_name').value
         self.subscription = self.create_subscription(
             BehaviorTreeLog,
-            '/behavior_tree_log',
+            topic_name,
             self.listener_callback,
             10)
-        self.subscription  # prevent unused variable warning
-        self.get_logger().info('Bridge started, listening on /behavior_tree_log')
+        self.get_logger().info(f'Bridge started, listening on {topic_name}')
 
     def listener_callback(self, msg):
         # Convert msg to JSON
@@ -44,14 +56,13 @@ class BehaviorTreeBridge(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    bridge = BehaviorTreeBridge()
+    bridge = BehaviorTreeBridge('/behavior_tree_log')
     try:
         rclpy.spin(bridge)
-    except KeyboardInterrupt:
-        pass
-    finally:
         bridge.destroy_node()
         rclpy.shutdown()
+    except Exception:
+        pass  
 
 if __name__ == '__main__':
     main()

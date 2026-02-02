@@ -40,6 +40,7 @@ class BehaviorTreePreviewManager {
         this._extensionUri = _extensionUri;
         this._previews = new Map();
         this._cachedDocs = new Map();
+        this._currentTopic = '/behavior_tree_log';
         // Update all active previews when the document changes
         vscode.workspace.onDidChangeTextDocument(e => {
             const preview = this._previews.get(e.document.uri.toString());
@@ -105,8 +106,15 @@ class BehaviorTreePreviewManager {
                 case 'loadLibrary':
                     this.handleLoadLibrary(panel);
                     break;
+                case 'updateTopic':
+                    this.handleUpdateTopic(panel, message.topic);
+                    break;
+                    break;
                 case 'rename_node':
                     this.handleRenameNode(uri, message.id, message.newName);
+                    break;
+                case 'reparent_node':
+                    this.handleReparentNode(uri, message.sourceId, message.targetId);
                     break;
             }
         });
@@ -175,6 +183,30 @@ class BehaviorTreePreviewManager {
             node.parentNode.removeChild(node);
             this.saveXml(uri, doc); // Update file (clean)
             this.updateWebviewWithDoc(uri, doc); // Update view (with IDs)
+        }
+    }
+    handleReparentNode(uri, childId, parentId) {
+        const doc = this.getDoc(uri);
+        if (!doc)
+            return;
+        const childNode = this.findNodeById(doc, childId);
+        const parentNode = this.findNodeById(doc, parentId);
+        if (childNode && parentNode) {
+            // Remove from old parent
+            if (childNode.parentNode) {
+                childNode.parentNode.removeChild(childNode);
+            }
+            // Append to new parent
+            parentNode.appendChild(childNode);
+            // It's no longer detached if it was
+            if (childNode.getAttribute('_visual_detached')) {
+                childNode.removeAttribute('_visual_detached');
+            }
+            this.saveXml(uri, doc);
+            this.updateWebviewWithDoc(uri, doc);
+        }
+        else {
+            console.warn(`[Backend] Reparent failed. Child: ${childId} found=${!!childNode}, Parent: ${parentId} found=${!!parentNode}`);
         }
     }
     handleDeleteEdge(uri, childId) {
@@ -257,42 +289,110 @@ class BehaviorTreePreviewManager {
         if (this._bridgeProcess) {
             return;
         }
-        const pythonPath = 'python3';
-        const scriptPath = path.join(this._extensionUri.fsPath, 'src', 'ros_bridge.py');
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (!workspaceFolders) {
+            vscode.window.showErrorMessage("No workspace open.");
+            return;
+        }
+        const pythonScriptPath = path.join(this._extensionUri.fsPath, 'src', 'ros_bridge.py');
+        const cwd = workspaceFolders[0].uri.fsPath;
         try {
-            this._bridgeProcess = cp.spawn(pythonPath, [scriptPath]);
+            let command = 'python3';
+            let args = [pythonScriptPath, '--ros-args', '-p', `topic_name:=${this._currentTopic}`];
+            let shell = true;
+            // Robust ROS Environment Sourcing
+            // If we are on Linux, check for /opt/ros to try and source automatically
+            if (process.platform === 'linux' && fs.existsSync('/opt/ros')) {
+                try {
+                    const distros = fs.readdirSync('/opt/ros');
+                    if (distros.length > 0) {
+                        // Prefer humble, foxy, or just the first one
+                        const selected = distros.find(d => d === 'humble') || distros.find(d => d === 'foxy') || distros[0];
+                        const setupScript = `/opt/ros/${selected}/setup.bash`;
+                        console.log(`[BehaviorTreePreview] Detected ROS distro: ${selected}. Will source ${setupScript}`);
+                        // Wrap in bash source command
+                        command = '/bin/bash'; // Use full path for safety
+                        // We need to properly quote the python script path and ensure correct chaining
+                        // Using '.' (dot) is safer than 'source' for POSIX compliance, though regular bash supports both.
+                        // We use a single string script for bash -c
+                        const pythonCmd = `python3 -u "${pythonScriptPath}" --ros-args -p topic_name:="${this._currentTopic}"`;
+                        // NOTE: using . (dot) instead of source
+                        args = ['-c', `. "${setupScript}" && ${pythonCmd}`];
+                    }
+                }
+                catch (e) {
+                    console.warn('Error detecting ROS distro:', e);
+                }
+            }
+            // Pass environment variables, explicitly handling PYTHONPATH and LD_LIBRARY_PATH
+            const env = {
+                ...process.env,
+                PYTHONPATH: process.env.PYTHONPATH || '',
+                LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH || ''
+            };
+            this._bridgeProcess = cp.spawn(command, args, {
+                cwd: cwd,
+                env: env,
+                shell: false // We are explicitly invoking bash, so no need for extra shell wrapping
+            });
+            console.log(`[BehaviorTreePreview] Spawned: ${command} ${args.join(' ')}`);
+            let dataBuffer = '';
             this._bridgeProcess.stdout?.on('data', (data) => {
-                const lines = data.toString().split('\n');
+                dataBuffer += data.toString();
+                const lines = dataBuffer.split('\n');
+                // Process all complete lines
+                // The last element is either an empty string (if data ended with \n) 
+                // or an incomplete line (fragment) which we should keep in buffer
+                dataBuffer = lines.pop() || '';
                 for (const line of lines) {
-                    if (line.trim()) {
+                    const trimmed = line.trim();
+                    if (!trimmed)
+                        continue;
+                    if (trimmed.startsWith('{')) {
                         try {
-                            const json = JSON.parse(line);
+                            const json = JSON.parse(trimmed);
                             panel.webview.postMessage({
                                 type: 'status_update',
                                 data: json
                             });
                         }
                         catch (e) {
-                            console.log('Bridge output:', line);
+                            console.error("Error parsing JSON line:", e, trimmed);
                         }
+                    }
+                    else {
+                        console.log(`[Bridge Output]: ${trimmed}`);
                     }
                 }
             });
             this._bridgeProcess.stderr?.on('data', (data) => {
-                console.error('Bridge error:', data.toString());
+                console.info(`[Bridge Output]: ${data}`);
             });
-            this._bridgeProcess.on('error', (err) => {
-                vscode.window.showErrorMessage(`Failed to start ROS bridge: ${err.message}`);
-                this.stopInspectionMode();
-            });
-            this._bridgeProcess.on('exit', (code, signal) => {
-                console.log(`Bridge exited with code ${code} and signal ${signal}`);
+            this._bridgeProcess.on('close', (code) => {
+                console.log(`Bridge process exited with code ${code}`);
                 this._bridgeProcess = undefined;
             });
-            vscode.window.showInformationMessage("Inspection Mode Started: Listening to ROS 2 topic...");
+            vscode.window.showInformationMessage(`Inspection Mode Started: Listening to ${this._currentTopic}...`);
         }
         catch (e) {
             vscode.window.showErrorMessage(`Error starting bridge: ${e.message}`);
+        }
+    }
+    handleUpdateTopic(panel, newTopic) {
+        console.log(`[Backend] handleUpdateTopic called with: ${newTopic}. Current: ${this._currentTopic}`);
+        if (this._currentTopic !== newTopic) {
+            this._currentTopic = newTopic;
+            // If running, restart to apply new topic
+            if (this._bridgeProcess) {
+                console.log(`[Backend] Restarting bridge for new topic...`);
+                this.stopInspectionMode();
+                setTimeout(() => {
+                    this.startInspectionMode(panel);
+                }, 500); // Small delay to ensure clean exit
+            }
+            else {
+                console.log(`[Backend] Bridge not running, just updated topic config.`);
+            }
         }
     }
     handleRenameNode(uri, id, newName) {

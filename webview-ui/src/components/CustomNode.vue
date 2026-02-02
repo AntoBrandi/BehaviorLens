@@ -24,7 +24,7 @@ const isRoot = computed(() => {
 
 const isLeaf = computed(() => {
     const type = (props.data?.type || '').toLowerCase();
-    return type === 'action' || type === 'condition';
+    return type === 'action' || type === 'condition' || type === 'subtree';
 });
 
 const iconSvg = computed(() => {
@@ -47,7 +47,8 @@ const iconSvg = computed(() => {
    if (type === 'condition') return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H8c0-2.21 1.79-4 4-4s4 1.79 4 4c0 .88-.36 1.68-.93 2.25z" fill="currentColor"/></svg>'; // Simple Question Mark
    if (type === 'control') return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2L2 22h20L12 2z" fill="currentColor" /></svg>'; // Default Control Triangle
    if (type === 'decorator') return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2l10 10-10 10-10-10z" fill="currentColor" /></svg>'; // Rhombus
-   if (type === 'root') return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="10" y="2" width="4" height="4" /><path d="M12 6v6 M6 12h12 M6 12v4 M18 12v4" /><rect x="4" y="16" width="4" height="4" /><rect x="16" y="16" width="4" height="4" /></svg>'; // Hierarchy/Tree Icon
+   if (type === 'decorator') return '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2l10 10-10 10-10-10z" fill="currentColor" /></svg>'; // Rhombus
+   if (type === 'root' || type === 'subtree') return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="10" y="2" width="4" height="4" /><path d="M12 6v6 M6 12h12 M6 12v4 M18 12v4" /><rect x="4" y="16" width="4" height="4" /><rect x="16" y="16" width="4" height="4" /></svg>'; // Hierarchy/Tree Icon
    
    return '';
 });
@@ -107,7 +108,7 @@ const vFocus = {
 </script>
 
 <template>
-  <div class="custom-node" :class="typeClass" :style="{ borderColor: statusColor, boxShadow: statusColor !== 'transparent' ? `0 0 5px ${statusColor}` : 'none' }">
+  <div class="custom-node" :class="{ ...typeClass ? {[typeClass]: true} : {}, blink: data.blink }" :style="{ borderColor: statusColor, borderWidth: statusColor !== 'transparent' ? '4px' : '2px', boxShadow: statusColor !== 'transparent' ? `0 0 15px ${statusColor}` : 'none' }">
     <Handle v-if="!isRoot" type="target" :position="targetPosition || Position.Top" class="handle" />
     
     <div class="node-content">
@@ -231,6 +232,12 @@ const vFocus = {
 }
 .custom-node.root .icon { color: #616161; }
 
+.custom-node.subtree {
+    background: #fffde7; /* Light Yellow */
+    border-color: #fbc02d; /* Yellow Darker */
+}
+.custom-node.subtree .icon { color: #f9a825; }
+
 .ports {
     width: 100%;
     margin-top: 8px;
@@ -261,6 +268,16 @@ const vFocus = {
     padding: 2px 4px;
     font-size: 10px;
     min-width: 0; 
+}
+
+@keyframes blink-animation {
+  0% { transform: scale(1); filter: brightness(1); }
+  50% { transform: scale(1.05); filter: brightness(1.2); }
+  100% { transform: scale(1); filter: brightness(1); }
+}
+
+.custom-node.blink {
+  animation: blink-animation 0.2s ease-in-out;
 }
 
 </style>

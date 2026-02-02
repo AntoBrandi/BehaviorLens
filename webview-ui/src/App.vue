@@ -15,6 +15,17 @@ const isFirstLoad = ref(true);
 const layoutDirection = ref('TB');
 const showPorts = ref(false);
 const errorLog = ref('');
+const treeDefinitions = ref<Map<string, Element>>(new Map());
+const showExpandMenu = ref(false);
+const subTreeToExpand = ref<string | null>(null);
+const rosTopic = ref('/behavior_tree_log');
+
+function updateTopic() {
+    vscode.postMessage({
+        type: 'updateTopic',
+        topic: rosTopic.value
+    });
+}
 
 onErrorCaptured((err) => {
     console.error("Captured Error:", err);
@@ -64,7 +75,10 @@ const libraryGroups = computed(() => {
 });
 
 // Vue Flow
-const { onConnect, addEdges, onNodeDragStop, fitView, setNodes, setEdges, applyNodeChanges, applyEdgeChanges, removeNodes, removeEdges, project } = useVueFlow();
+const { onConnect, addEdges, onNodeDragStop, fitView, setNodes, setEdges, applyNodeChanges, applyEdgeChanges, removeNodes, removeEdges, project } = useVueFlow({
+    minZoom: 0.2,
+    maxZoom: 4
+});
 const nodes = ref([]);
 const edges = ref([]);
 
@@ -75,9 +89,12 @@ function onNodesChange(changes: any[]) {
             const node = nodes.value.find((n: any) => n.id === change.id);
             if (node?.data?.isRoot) return; // Prevent deletion of Root
 
+            // If ID is composite (ID#Path), use data.xmlId or extract it
+            const xmlId = node?.data?.xmlId || change.id.split('#')[0];
+            
             vscode.postMessage({
                 type: 'delete_node',
-                id: change.id
+                id: xmlId
             });
             // Clear from cache if deleted
             if (node?.data?.xmlId) {
@@ -91,9 +108,12 @@ function onEdgesChange(changes: any[]) {
         if (change.type === 'remove') {
             const edge = edges.value.find((e: any) => e.id === change.id);
             if (edge) {
+                const targetNode = nodes.value.find((n: any) => n.id === edge.target);
+                const xmlId = targetNode?.data?.xmlId || edge.target.split('#')[0];
+
                 vscode.postMessage({
                     type: 'delete_edge',
-                    targetId: edge.target
+                    targetId: xmlId
                 });
             }
         }
@@ -143,7 +163,16 @@ function onDeleteFromMenu() {
     if (menu.value.type === 'node') {
         const node = nodes.value.find((n: any) => n.id === menu.value!.id);
         if (node?.data?.isRoot) return; // Prevent deletion of Root
-        removeNodes([menu.value.id]);  
+        
+        // Use graph ID for removal from view, but ensure backend gets XML ID if needed?
+        // Actually removeNodes expects graph IDs.
+        removeNodes([menu.value.id]);
+        
+        // If we want to send message to backend (we do in onNodesChange via listener), 
+        // dragging/context menu deletion might trigger onNodesChange?
+        // Yes, removeNodes triggers onNodesChange. So we don't need to postMessage here IF onNodesChange handles it.
+        // Checking onNodesChange implementation... yes it sends the message.
+        // So we just need to ensure onNodesChange handles the composite ID (which I did in previous step).
     } else {
         removeEdges([menu.value.id]);
     }
@@ -151,6 +180,38 @@ function onDeleteFromMenu() {
 }
 
 const editingNodeId = ref<string | null>(null);
+
+function onExpandSubTree() {
+    if (!subTreeToExpand.value) return;
+    expandSubTree(subTreeToExpand.value);
+    showExpandMenu.value = false;
+    subTreeToExpand.value = null;
+    menu.value = null;
+}
+
+function onNodeClick(event: any) {
+    // Only show for SubTree nodes
+    const node = event.node;
+    if (node.data.type === 'subtree') {
+        const { clientX, clientY } = event.event;
+        menu.value = {
+            x: clientX,
+            y: clientY,
+            type: 'node',
+            id: node.id
+        };
+        
+        event.event.preventDefault(); 
+        event.event.stopPropagation();
+        
+        subTreeToExpand.value = node.id;
+        showExpandMenu.value = true;
+    } else {
+        showExpandMenu.value = false;
+        subTreeToExpand.value = null;
+        menu.value = null;
+    }
+}
 
 function onRenameFromMenu() {
     if (!menu.value || menu.value.type !== 'node') return;
@@ -170,7 +231,7 @@ function onSaveLabel(payload: { nodeId: string, newLabel: string }) {
             
             vscode.postMessage({
                 type: 'rename_node',
-                id: payload.nodeId,
+                id: node.data.xmlId || payload.nodeId.split('#')[0],
                 newName: payload.newLabel
             });
         }
@@ -183,29 +244,46 @@ function onCancelEdit() {
 }
 
 function onRequestEdit(nodeId: string) {
+    if (currentMode.value === 'inspection') return;
     editingNodeId.value = nodeId;
 }
 
 // Type Inference Logic
-function getNodeType(tagName: string): string {
+function getNodeType(tagName: string, hasChildren: boolean): string {
     // 1. Check Library first
     if (nodeLibrary.value[tagName]) {
         return nodeLibrary.value[tagName].type.toLowerCase();
     }
 
-    // 2. Fallback
     const lower = tagName.toLowerCase();
-    if (['sequence', 'fallback', 'parallel', 'reactivesequence', 'reactivefallback', 'switch2', 'switch3', 'switch4', 'if', 'while'].includes(lower)) {
+    
+    // 2. Explicit types from lists
+    if (['sequence', 'fallback', 'parallel', 'reactivesequence', 'reactivefallback', 'switch2', 'switch3', 'switch4', 'if', 'while', 'control'].includes(lower)) {
         return 'control';
     }
-    if (['inverter', 'forcesuccess', 'forcefailure', 'repeat', 'retry', 'timeout', 'delay', 'keeprunninguntilfailure', 'alwayssuccess', 'alwaysfailure'].includes(lower)) {
+    if (['inverter', 'forcesuccess', 'forcefailure', 'repeat', 'retry', 'timeout', 'delay', 'keeprunninguntilfailure', 'alwayssuccess', 'alwaysfailure', 'decorator'].includes(lower)) {
         return 'decorator';
     }
-    // Heuristic: If it has "Condition" in name it's likely a condition
+
+    // 3. Heuristic based on children
+    // If it has children, it must be an internal node (Control or Decorator).
+    // It logic above didn't catch it, we default to Control.
+    if (hasChildren) {
+        return 'control';
+    }
+
+    // 4. Heuristic: If it has "Condition" in name it's likely a condition
+    // Only if it implies no children (leaf)
     if (tagName.includes('Condition')) {
         return 'condition';
     }
-    // Default to Action
+
+    // 5. Explicit check for SubTree
+    if (tagName === 'SubTree') {
+        return 'subtree';
+    }
+
+    // Default to Action (Leaf)
     return 'action';
 }
 
@@ -239,25 +317,21 @@ function parseXML(text: string) {
         return attrs;
     }
 
-    // Recursive Graph Builder
-    function buildGraph(xmlNode: Element, currentPath: string, parentId: string | null) {
+    // Recursive Graph Builder (mutates passed arrays)
+    function buildGraphRecursive(xmlNode: Element, currentPath: string, parentId: string | null, targetNodes: any[], targetEdges: any[]) {
         if (xmlNode.nodeType !== 1) return;
 
-        // internalId was path based. Now we use the XML ID.
-        // We guarantee IDs exist via the backend ensureTempIds logic.
-        // Fallback to random if something is weird, but should be stable.
         const xmlId = xmlNode.getAttribute('ID');
-        if (!xmlId) {
-             console.error("Node missing ID:", xmlNode);
-             return; 
-        }
+        if (!xmlId) return;
 
-        const internalId = xmlId; // STABLE ID
+        const internalId = `${xmlId}#${currentPath}`; // Unique ID per instance
         const label = xmlNode.tagName;
         const name = xmlNode.getAttribute('name');
-        const inferredType = getNodeType(label);
+        
+        const hasChildren = xmlNode.children.length > 0;
+        const inferredType = getNodeType(label, hasChildren);
 
-        newNodes.push({
+        targetNodes.push({
             id: internalId,
             type: 'custom',
             label: name || label,
@@ -272,7 +346,7 @@ function parseXML(text: string) {
         });
 
         if (parentId && xmlNode.getAttribute('_visual_detached') !== 'true') {
-            newEdges.push({
+            targetEdges.push({
                 id: `e${parentId}-${internalId}`,
                 source: parentId,
                 target: internalId,
@@ -285,7 +359,7 @@ function parseXML(text: string) {
         for (let i = 0; i < xmlNode.children.length; i++) {
             const child = xmlNode.children[i];
             if (child.nodeType === 1) { 
-                 buildGraph(child, `${currentPath}-${childIndex}`, internalId);
+                 buildGraphRecursive(child, `${currentPath}-${childIndex}`, internalId, targetNodes, targetEdges);
                  childIndex++;
             }
         }
@@ -351,7 +425,7 @@ function parseXML(text: string) {
             const child = mainTree.children[i];
             if (child.nodeType === 1) {
                 // Parent ID is rootId
-                buildGraph(child, `${mainTreePath}-${childIndex}`, rootId);
+                buildGraphRecursive(child, `${mainTreePath}-${childIndex}`, rootId, newNodes, newEdges);
                 childIndex++;
             }
         }
@@ -363,22 +437,18 @@ function parseXML(text: string) {
         for(let i=0; i<rootChildren.length; i++) {
             const child = rootChildren[i];
             if (child.nodeType === 1 && child !== mainTree && child.tagName !== 'BehaviorTree') {
-                // Determine path relative to root? Or handle as separate roots?
-                // buildGraph expects a "currentPath". For root children, we can use "root-i"?
-                // Backend 'findElementByPath' might fail if we don't follow structure "0-k".
-                // Our backend 'findElementByPath' assumes Root is "0". 
-                // "0-k" is K-th child of Root.
-                // THESE nodes are children of Root.
-                // So their path IS valid: 0-i.
-                // We just need to ensure index matches XML index.
-                
-                // WAIT! buildGraph uses 'currentPath' to assign IDs if XML ID missing?
-                // No, now we use XML ID. So path is irrelevant for ID generation.
-                // It IS used for 'findElementByPath' if we used that tool, 
-                // but we rely on XML ID now.
-                
-                buildGraph(child, `0-${i}`, null); // parentId=null -> Floating
+                buildGraphRecursive(child, `0-${i}`, null, newNodes, newEdges);
             }
+        }
+        
+        // Populate treeDefinitions
+        treeDefinitions.value.clear();
+        for(let i=0; i<rootChildren.length; i++) {
+             const child = rootChildren[i];
+             if (child.tagName === 'BehaviorTree') {
+                 const id = child.getAttribute('ID');
+                 if (id) treeDefinitions.value.set(id, child);
+             }
         }
     }
 
@@ -392,26 +462,12 @@ function parseXML(text: string) {
             console.log(`[Reconciliation] Found cached position for ${xmlId}:`, userNodePositions.value.get(xmlId));
             node.position = userNodePositions.value.get(xmlId);
             return;
-        } else if (xmlId) {
-             console.log(`[Reconciliation] No cached position for ${xmlId}. Cache keys:`, [...userNodePositions.value.keys()]);
         }
 
-        // 2. If it's a stable node (already existed), keep its position unless it's a new layout
-        // We want to favor the 'old' position to prevent jumping.
-        // BUT, dagre calculates the *ideal* new position.
-        // If we always use oldPos, we break auto-layout for dragging significantly.
-        // However, user complains about jumping.
-        // Compromise: If we have an old position, use it. Only use Dagre for NEW nodes.
-        // For auto-layout, user can click "Layout" button which clears userNodePositions.
-        
         const oldPos = oldPositions.get(xmlId);
         if (oldPos) {
              node.position = oldPos;
-             // We implicitly trust the old position until a full layout is requested
-             // userNodePositions.value.set(xmlId, oldPos); // Optional: make it sticky?
         }
-        
-        // 3. Fallback to Dagre position (already set by getLayoutedElements) if no oldPos
     });
 
     nodes.value = layout.nodes;
@@ -421,6 +477,162 @@ function parseXML(text: string) {
         fitView();
         isFirstLoad.value = false;
     }
+}
+
+// Separate function for expansion relying on same logic, but we need to instantiate it or move it out.
+// Ideally move logic out. For now, I'll duplicate the simplified builder logic or extract it properly.
+// The `parseXML` function is huge.
+// Let's create a standalone builder function outside parseXML.
+
+function populateGraph(xmlNode: Element, currentPath: string, parentId: string | null, targetNodes: any[], targetEdges: any[]) {
+     if (xmlNode.nodeType !== 1) return;
+
+    const xmlId = xmlNode.getAttribute('ID');
+    if (!xmlId) return;
+
+    const internalId = `${xmlId}#${currentPath}`;
+    const label = xmlNode.tagName;
+    const name = xmlNode.getAttribute('name');
+    
+    // Check if node has children OR if it's a SubTree (which shouldn't have children by default but we are populating)
+    const hasChildren = xmlNode.children.length > 0;
+    const inferredType = getNodeType(label, hasChildren);
+
+    function getAttrs(node: Element) {
+        const attrs: Record<string, string> = {};
+        for(let i=0; i<node.attributes.length; i++) {
+            const attr = node.attributes[i];
+            attrs[attr.name] = attr.value;
+        }
+        return attrs;
+    }
+
+    targetNodes.push({
+        id: internalId,
+        type: 'custom',
+        label: name || label,
+        data: { 
+            label: name || label, 
+            type: inferredType, 
+            originalName: label,
+            xmlId: xmlId,
+            attributes: getAttrs(xmlNode)
+        },
+        position: { x: 0, y: 0 } 
+    });
+
+    if (parentId) {
+        targetEdges.push({
+            id: `e${parentId}-${internalId}`,
+            source: parentId,
+            target: internalId,
+            type: 'default'
+        });
+    }
+
+    let childIndex = 0;
+    for (let i = 0; i < xmlNode.children.length; i++) {
+        const child = xmlNode.children[i];
+        if (child.nodeType === 1) { 
+             populateGraph(child, `${currentPath}-${childIndex}`, internalId, targetNodes, targetEdges);
+             childIndex++;
+        }
+    }
+}
+
+function expandSubTree(nodeId: string) {
+    const nodeIndex = nodes.value.findIndex((n: any) => n.id === nodeId);
+    if (nodeIndex === -1) return;
+    
+    const subTreeNode = nodes.value[nodeIndex];
+    if (subTreeNode.data.type !== 'subtree') return;
+    
+    // Capture original position
+    const originalPosition = { ...subTreeNode.position };
+    
+    const treeId = subTreeNode.data.xmlId || subTreeNode.data.originalName;
+    const definition = treeDefinitions.value.get(treeId);
+    
+    if (!definition) {
+        console.warn(`Definition for SubTree ${treeId} not found.`);
+        return;
+    }
+    
+    const parentEdge = edges.value.find((e: any) => e.target === nodeId);
+    const parentId = parentEdge ? parentEdge.source : null;
+    
+    const subTreePath = nodeId.split('#')[1]; 
+    if (!subTreePath) return;
+
+    const newNodes: any[] = [];
+    const newEdges: any[] = [];
+    
+    let rootChild: Element | null = null;
+    for(let i=0; i<definition.children.length; i++) {
+        if (definition.children[i].nodeType === 1) {
+            rootChild = definition.children[i];
+            break;
+        }
+    }
+    
+    if (!rootChild) return;
+    
+    // Populate graph logic...
+    populateGraph(rootChild, subTreePath, parentId, newNodes, newEdges);
+    
+    // LOCAL LAYOUT CALCULATION
+    // 1. Isolate internal edges (edges between newNodes)
+    // The edge from parentId -> newRoot is NOT internal for layout purposes of the subtree itself 
+    // if we want to treat newRoot as the "root" of the local layout.
+    // However, getLayoutedElements expects a graph.
+    // If we pass ONLY newNodes and internal edges, dagre will layout them relative to (0,0).
+    
+    const newNodeIds = new Set(newNodes.map(n => n.id));
+    const internalEdges = newEdges.filter(e => newNodeIds.has(e.source) && newNodeIds.has(e.target));
+    
+    // 2. Compute layout for just the new subtree
+    const layout = getLayoutedElements(newNodes, internalEdges, layoutDirection.value);
+    
+    // 3. Find the new root node (the one connected to parentId, or the one with no incoming internal edges)
+    // The populateGraph call recursively adds nodes. The first one added is usually the root.
+    // ID of the new root should be `${rootChild.getAttribute('ID')}#${subTreePath}`.
+    // Or we can find it by checking which node has parentId as source in newEdges
+    const incomingEdge = newEdges.find(e => e.source === parentId);
+    const newRootId = incomingEdge ? incomingEdge.target : newNodes[0].id; // Fallback
+    
+    const newRoot = layout.nodes.find((n: any) => n.id === newRootId);
+    
+    if (!newRoot) return;
+    
+    // 4. Calculate Offset
+    // We want newRoot.position to match originalPosition
+    const offsetX = originalPosition.x - newRoot.position.x;
+    const offsetY = originalPosition.y - newRoot.position.y;
+    
+    // 5. Apply Offset to ALL new nodes
+    layout.nodes.forEach((n: any) => {
+        n.position.x += offsetX;
+        n.position.y += offsetY;
+        
+        // Cache this new position so it sticks if we do a future global reconciliation (optional, but good practice)
+        if (n.data.xmlId) {
+             userNodePositions.value.set(n.data.xmlId, { ...n.position });
+        }
+    });
+    
+    // Remove SubTree node
+    const remainingNodes = nodes.value.filter((n: any) => n.id !== nodeId);
+    // Remove incoming edge to SubTree, but keep other edges
+    const remainingEdges = edges.value.filter((e: any) => e.target !== nodeId); 
+    
+    // Verify valid edges? 
+    // populateGraph added edge parentId -> newRootId to newEdges.
+    // We need to ensure that is kept. content of 'newEdges' has it.
+    
+    nodes.value = [...remainingNodes, ...layout.nodes];
+    edges.value = [...remainingEdges, ...newEdges];
+    
+    // Do NOT call global fitView or layout
 }
 
 function parseLibraryXML(text: string) {
@@ -476,17 +688,80 @@ function parseLibraryXML(text: string) {
 }
 
 
+// Helper to reorder children based on visual position
+function reorderChildren(parentId: string) {
+    // 1. Find all edges where source is parentId
+    // Edges are reactive
+    const childEdges = edges.value.filter((e: any) => e.source === parentId);
+    if (childEdges.length <= 1) return; // Nothing to sort
+
+    // 2. Map edges to target nodes
+    const childrenNodes = childEdges.map((e: any) => nodes.value.find((n: any) => n.id === e.target)).filter((n: any) => n !== undefined);
+
+    // 3. Sort based on layout direction
+    // If TB (Vertical), Left-to-Right is X.
+    // If LR (Horizontal), Top-to-Bottom order is Y.
+    const isVertical = layoutDirection.value === 'TB';
+    
+    childrenNodes.sort((a: any, b: any) => {
+        if (isVertical) {
+            return a.position.x - b.position.x;
+        } else {
+            return a.position.y - b.position.y;
+        }
+    });
+
+    // 4. Extract XML IDs
+    const newOrder = childrenNodes.map((n: any) => n.data.xmlId).filter((id: any) => !!id);
+
+    console.log(`[App.vue] Reordering children of ${parentId} based on ${isVertical ? 'X' : 'Y'}:`, newOrder);
+
+    // 5. Send to backend
+    // Only if we define a 'reorder_children' message type in backend
+    // Check BehaviorTreePreview.ts -> handleReorderChildren exists? YES.
+    const parentNode = nodes.value.find((n: any) => n.id === parentId);
+    if (parentNode && parentNode.data.xmlId) {
+        vscode.postMessage({
+            type: 'reorder_children',
+            parentId: parentNode.data.xmlId,
+            newOrder: newOrder
+        });
+    }
+}
+
+
+
 onConnect((params) => {
-    console.log("[App.vue] onConnect triggered:", params);
-    // addEdges({ ...params, type: 'default' }); // Removed to prevent ghost edge. Backend handles update.
+    // Resolve nodes to get XML IDs
+    const sourceNode = nodes.value.find((n: any) => n.id === params.source);
+    const targetNode = nodes.value.find((n: any) => n.id === params.target);
+
+    const sourceXmlId = sourceNode?.data?.xmlId || params.source.split('#')[0];
+    const targetXmlId = targetNode?.data?.xmlId || params.target.split('#')[0];
+
+    console.log("[App.vue] onConnect triggered. Raw:", params, "XmlIDs:", { source: sourceXmlId, target: targetXmlId });
+   
+    // Add edge locally so reorderChildren can see it immediately
+    addEdges([params]);
+
     vscode.postMessage({
         type: 'reparent_node',
          // Backend expects: sourceId = Child (Node to move), targetId = Parent (Destination)
-         // Vue Flow params: source = Parent, target = Child
-        sourceId: params.target,
-        targetId: params.source
+         // Vue Flow edge: Source (Parent) -> Target (Child)
+         // So we want to move params.target (Child) to params.source (Parent)
+        sourceId: targetXmlId,
+        targetId: sourceXmlId
     });
-    console.log("[App.vue] Sent reparent_node message:", { sourceId: params.target, targetId: params.source });
+
+    // Trigger reorder after a tick to allow the edge to be registered?
+    // Edges reference is reactive. The edge might not be in 'edges.value' yet inside onConnect?
+    // onConnect is event, the edge is added by VueFlow automatically or via addEdges?
+    // Usually we need to add edge manually if we don't use default connection line behavior,
+    // but here we might rely on default.
+    // But wait, if we rely on default, 'edges.value' should update.
+    setTimeout(() => {
+        reorderChildren(params.source);
+    }, 100);
 });
 
 // Layout Graph
@@ -496,35 +771,90 @@ dagreGraph.setDefaultEdgeLabel(() => ({}));
 const nodeWidth = 172;
 const nodeHeight = 36;
 
-// Helper to count visible attributes
-function countAttributes(attributes: any) {
-    if (!attributes) return 0;
-    try {
-        return Object.keys(attributes).filter(k => k !== 'ID' && k !== 'name').length;
-    } catch (e) {
-        console.error("Error counting attributes:", e);
-        return 0;
+// Helper to count visible attributes including library ports
+function countVisiblePorts(node: any) {
+    const attrs = node.data.attributes || {};
+    const label = node.data.label;
+    const originalName = node.data.originalName;
+    
+    // Find definition (Logic matches CustomNode.vue)
+    const def = nodeLibrary.value[label] || nodeLibrary.value[originalName];
+
+    const seen = new Set<string>();
+    let count = 0;
+
+    // Count defined ports
+    if (def && def.ports) {
+        def.ports.forEach((p: any) => {
+            seen.add(p.name);
+            count++;
+        });
     }
+
+    // Count extra attributes not in definition
+    if (attrs) {
+        Object.keys(attrs).forEach(key => {
+            if (key !== 'ID' && key !== 'name' && !seen.has(key)) {
+                count++;
+            }
+        });
+    }
+
+    return count;
 }
 
 function getLayoutedElements(nodes: any[], edges: any[], direction = 'TB') {
-  const isHorizontal = direction === 'LR';
-  dagreGraph.setGraph({ rankdir: direction });
+  const dagreGraph = new dagre.graphlib.Graph();
+  dagreGraph.setDefaultEdgeLabel(() => ({}));
+  
+  // Set explicit separation to avoid overlap in LR mode
+  dagreGraph.setGraph({ 
+      rankdir: direction,
+      nodesep: 40, // Horizontal separation in TB, Vertical in LR
+      ranksep: 60 // Vertical separation in TB, Horizontal in LR
+  });
 
   nodes.forEach((node) => {
     let height = nodeHeight;
+    let width = nodeWidth;
+
     if (showPorts.value) {
-        const attrCount = countAttributes(node.data.attributes);
-        // Approx height per port (label + input + gap) ~ 30px? 
-        // Style says 10px font, padding... let's say 28px per port to be safe
+        const attrCount = countVisiblePorts(node);
         if (attrCount > 0) {
             height += 8; // Top margin for ports container
             height += attrCount * 32; // Per port item
+            
+            // Dynamic Width Calculation based on max line length
+            // Heuristic: 7px per char + 20px padding + 20px label/input overhead
+            // We need to check all keys + values length
+            let maxLineLen = 0;
+            const def = nodeLibrary.value[node.data.label] || nodeLibrary.value[node.data.originalName];
+            
+            // 1. Check definition ports
+             if (def && def.ports) {
+                def.ports.forEach((p: any) => {
+                    const lineLen = (p.name || '').length + (p.default || '').length;
+                    if (lineLen > maxLineLen) maxLineLen = lineLen;
+                });
+            }
+            // 2. Check attributes
+            if (node.data.attributes) {
+                 Object.entries(node.data.attributes).forEach(([k, v]) => {
+                     if (k !== 'ID' && k !== 'name') {
+                         const lineLen = k.length + String(v).length;
+                         if (lineLen > maxLineLen) maxLineLen = lineLen;
+                     }
+                 });
+            }
+            
+            const estimatedWidth = (maxLineLen * 8) + 60; // 8px char width + padding
+            if (estimatedWidth > width) {
+                width = estimatedWidth;
+            }
         }
     }
-    dagreGraph.setNode(node.id, { width: nodeWidth, height: height });
+    dagreGraph.setNode(node.id, { width, height });
   });
-//...
 
   edges.forEach((edge) => {
     dagreGraph.setEdge(edge.source, edge.target);
@@ -535,15 +865,24 @@ function getLayoutedElements(nodes: any[], edges: any[], direction = 'TB') {
   nodes.forEach((node) => {
     const nodeWithPosition = dagreGraph.node(node.id);
     // Shift dagre center to top-left for Vue Flow
-    node.targetPosition = isHorizontal ? Position.Left : Position.Top;
-    node.sourcePosition = isHorizontal ? Position.Right : Position.Bottom;
+    node.targetPosition = direction === 'LR' ? Position.Left : Position.Top;
+    node.sourcePosition = direction === 'LR' ? Position.Right : Position.Bottom;
+    
+    // We must use the calculated width/height from dagre, derived from our inputs
+    const w = nodeWithPosition.width;
+    const h = nodeWithPosition.height;
+    
     node.position = { 
-        x: nodeWithPosition.x - nodeWidth / 2, 
-        y: nodeWithPosition.y - nodeWithPosition.height / 2 
+        x: nodeWithPosition.x - w / 2, 
+        y: nodeWithPosition.y - h / 2 
     };
+    
+    // Store size in data if needed by custom node (optional, but handled by CSS mostly)
+    // React Flow handles size via style width/height usually 
   });
 
   return { nodes, edges };
+
 }
 
 // Drag and Drop
@@ -644,11 +983,40 @@ function onDrop(event: DragEvent) {
 // Toggle Mode
 function toggleMode() {
   currentMode.value = currentMode.value === 'editor' ? 'inspection' : 'editor';
+  
+  if (currentMode.value === 'editor') {
+      // Clear all status/highlighting
+      nodes.value.forEach((node: any) => {
+          if (node.data && node.data.status) {
+              // Create new data object to trigger reactivity if needed, or just assignment
+              // node.data.status = undefined; // might not trigger deep watch
+              node.data = { ...node.data, status: undefined, realStatus: undefined }; 
+          }
+      });
+  }
+
   vscode.postMessage({
     type: 'switchMode',
     mode: currentMode.value
   });
 }
+
+onNodeDragStop((event) => {
+    // 1. Update Position Cache
+    event.nodes.forEach((node) => {
+        // Use XML ID for persistence if available
+        const id = node.data?.xmlId || node.id;
+        userNodePositions.value.set(id, { ...node.position });
+        
+        // 2. Trigger Reordering for Parent(s)
+        const parentEdges = edges.value.filter((e) => e.target === node.id);
+        const parentIds = new Set(parentEdges.map((e) => e.source));
+        
+        parentIds.forEach((parentId) => {
+            reorderChildren(parentId);
+        });
+    });
+});
 
 function toggleLayout() {
   layoutDirection.value = layoutDirection.value === 'TB' ? 'LR' : 'TB';
@@ -695,13 +1063,76 @@ function handleStatusUpdate(data: any) {
     if (!data.event_log) return;
 
     data.event_log.forEach((event: any) => {
-         const node = nodes.value.find((n: any) => n.id === event.node_name || n.data.originalName === event.node_name);
-         if (node) {
-             node.data = {
+         // 1. Find candidates (Name/ID matching)
+         const candidates = nodes.value.filter((n: any) => {
+             // Check composite ID or internal ID
+             if (n.id === event.node_name) return true;
+             
+             // Check XML ID (ID attribute)
+             if (n.data?.xmlId === event.node_name) return true;
+             
+             // Check Label (often the Name for custom nodes)
+             if (n.data?.label === event.node_name) return true;
+             
+             // Check explicit Name attribute
+             // Some nodes like <Action ID="Move" name="MoveToGoal"> might log "MoveToGoal"
+             if (n.data?.attributes?.name === event.node_name) return true;
+
+             // Fallback: Check original tagName (rarely unique but sometimes logged)
+             // ONLY if the node does not have a custom label/name that differentiates it.
+             // If a node is named "ClearingActions" (type Sequence), it should NOT match "Sequence".
+             if (n.data?.originalName === event.node_name) {
+                 const currentLabel = n.data?.label || '';
+                 const original = n.data?.originalName || '';
+                 // Accept match only if label is generic (same as original or empty)
+                 if (currentLabel === original || !currentLabel) {
+                     return true;
+                 }
+             }
+             
+             return false;
+         });
+
+         // 2. Disambiguate by Previous Status (Best Effort)
+         // Only update nodes that are in the expected 'previous' state.
+         // Use realStatus (logical state) instead of visual status for correctness.
+         const exactMatches = candidates.filter((n: any) => 
+             (n.data?.realStatus || 'IDLE') === event.previous_status
+         );
+
+         // 3. Fallback: If no node matches the state transition (e.g. packet loss or first sync),
+         // update ALL candidates to resync them. 
+         // If we have exact matches, touch only them.
+         const targets = exactMatches.length > 0 ? exactMatches : candidates;
+
+         targets.forEach((node: any) => {
+             const newData = {
                  ...node.data,
-                 status: event.current_status
+                 realStatus: event.current_status
              };
-         }
+
+             // Visual Persistence & Blinking
+             if (event.current_status !== 'IDLE') {
+                 // Blink if re-triggering the same active status or just updating
+                 // Actually, blink on ANY active update is good feedback
+                 if (newData.status === event.current_status) {
+                     newData.blink = true;
+                     setTimeout(() => {
+                         // We need to mutate the responsive object directly or re-assign
+                         // Since we are in a loop, we can try to find the node again or just mutate if it's reactive
+                         // But `newData` is a local object. We need to touch the node ref.
+                         // Let's use a simpler approach: Set blink, then clear it.
+                         // However, referencing `node` inside timeout is safe closure.
+                         if (node.data) {
+                             node.data = { ...node.data, blink: false };
+                         }
+                     }, 200);
+                 }
+                 newData.status = event.current_status;
+             }
+
+             node.data = newData;
+         });
     });
 }
 
@@ -725,9 +1156,12 @@ window.addEventListener('message', event => {
 
 
 function onUpdateAttribute(payload: any) {
+    const node = nodes.value.find((n: any) => n.id === payload.nodeId);
+    const realId = node?.data?.xmlId || payload.nodeId.split('#')[0];
+    
     vscode.postMessage({
         type: 'editAttribute',
-        nodeId: payload.nodeId,
+        nodeId: realId,
         attr: payload.attr,
         value: payload.value
     });
@@ -752,6 +1186,16 @@ function onUpdateAttribute(payload: any) {
       <button @click="loadLibrary">
         Load Library
       </button>
+      <div v-if="currentMode === 'inspection'" class="topic-config">
+          <span class="topic-label">Topic:</span>
+          <input 
+            v-model="rosTopic" 
+            class="topic-input" 
+            @blur="updateTopic" 
+            @keydown.enter="updateTopic" 
+            placeholder="/behavior_tree_log" 
+          />
+      </div>
     </div>
 
     <div class="dnd-flow" @drop="onDrop" @dragover="onDragOver">
@@ -777,31 +1221,27 @@ function onUpdateAttribute(payload: any) {
             v-model:nodes="nodes" 
             v-model:edges="edges" 
             :fit-view-on-init="true"
-            :delete-key-code="['Backspace', 'Delete']"
-            @node-drag-stop="handleNodeDragStop"
+            :delete-key-code="currentMode === 'editor' ? ['Backspace', 'Delete'] : []"
             @nodes-change="onNodesChange"
             @edges-change="onEdgesChange"
             @node-context-menu="onNodeContextMenu"
             @edge-context-menu="onEdgeContextMenu"
+            @node-click="onNodeClick"
+            :default-viewport="{ x: 0, y: 0, zoom: 1 }"
+            :min-zoom="0.2"
+            :max-zoom="4"
+            :nodes-draggable="currentMode === 'editor'"
+            :nodes-connectable="currentMode === 'editor'"
+            :elements-selectable="true"
+            :edges-updatable="currentMode === 'editor'"
+            :edges-focusable="currentMode === 'editor'"
           >
-            <template #node-custom="props">
-                <CustomNode 
-                    :id="props.id"
-                    :data="props.data" 
-                    :source-position="props.sourcePosition" 
-                    :target-position="props.targetPosition"
-                    :show-ports="showPorts"
-                    :definition="nodeLibrary[props.data.label] || nodeLibrary[props.data.originalName]"
-                    :is-editing="editingNodeId === props.id"
-                    @update-attribute="onUpdateAttribute"
-                    @save-label="onSaveLabel"
-                    @cancel-edit="onCancelEdit"
-                    @request-edit="onRequestEdit"
-                />
-            </template>
-            <Background />
+            <Background :pattern-color="'#aaa'" :gap="16" />
             <Controls />
-
+            
+            <template #node-custom="props">
+              <CustomNode v-bind="props" :show-ports="showPorts" :definition="nodeLibrary[props.data.label] || nodeLibrary[props.data.originalName]" :is-editing="editingNodeId === props.id" @request-edit="onRequestEdit" @save-label="onSaveLabel" @cancel-edit="onCancelEdit" @update-attribute="onUpdateAttribute" />
+            </template>
           </VueFlow>
       </div>
     </div>
@@ -810,9 +1250,11 @@ function onUpdateAttribute(payload: any) {
         :x="menu.x" 
         :y="menu.y" 
         :type="menu.type" 
+        :show-expand="showExpandMenu"
         @close="menu = null" 
         @delete="onDeleteFromMenu" 
         @rename="onRenameFromMenu"
+        @expand="onExpandSubTree"
     />
   </div>
 </template>
@@ -830,6 +1272,25 @@ function onUpdateAttribute(payload: any) {
   border-bottom: 1px solid var(--vscode-panel-border);
   display: flex;
   gap: 10px;
+  align-items: center;
+}
+.topic-config {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: auto; /* Push to right */
+    font-size: 12px;
+}
+.topic-label {
+    font-weight: 500;
+}
+.topic-input {
+    padding: 4px;
+    border: 1px solid var(--vscode-input-border);
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border-radius: 2px;
+    width: 200px;
 }
 .dnd-flow {
     display: flex;
