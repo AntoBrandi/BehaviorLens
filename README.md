@@ -1,59 +1,82 @@
-# Behavior Lens
+<div align="center">
+  <img src="media/icon.png" width="128" />
+  <h1>BehaviorLens</h1>
+</div>
 
-**Behavior Lens** is a Visual Studio Code extension designed to visualize [BehaviorTree.CPP](https://github.com/BehaviorTree/BehaviorTree.CPP) XML files effectively. Gain insights into your behavior trees with an interactive preview.
+**The Ultimate Visual Studio Code Extension for BehaviorTree.CPP**
 
-## Features
+[BehaviorTree.CPP](https://github.com/BehaviorTree/BehaviorTree.CPP) is a fantastic library, and behavior trees are powerful. **BehaviorLens** brings that power directly into VS Code with a fully interactive, visual editor and debugger.
 
-- **Visualize Behavior Trees**: Open any `.xml` or `.tree` file containing BehaviorTree definitions.
-- **Interactive Preview**: Zoom, pan, and inspect your trees.
-- **Side Panel Support**: View your code and the tree visualization side-by-side.
+![BehaviorLens Overview](media/assets/BehaviorLensOverview.gif)
 
-## Usage
+## ✨ Features
 
-1. Open a BehaviorTree XML file.
-2. Open the Command Palette (`Ctrl+Shift+P` or `Cmd+Shift+P` on macOS).
-3. Run **"BehaviorTree: Open Preview"** to open the preview in the active editor group.
-4. Run **"BehaviorTree: Open Preview to the Side"** to open the preview in a separate column.
+### 🌲 Visual Editor & Preview
+Stop staring at raw XML. Visualize your Behavior Trees with a modern, interactive graph editor.
+- **Drag & Drop Reordering**: Organize your trees intuitively.
+- **Node Management**: Add, remove, and rename nodes easily with the context menu.
+- **Edit Attributes**: Modify node parameters directly in the UI.
+- **Smart Connection**: Connect nodes with validation to prevent cycles.
 
-## Release Instructions
+![BehaviorLens Editor](media/assets/BehaviorLensEditor.gif)
 
-To release this extension to the Visual Studio Code Marketplace, follow these steps:
+### 🤖 Live ROS 2 Integration
+Debug your robot's logic in real-time. BehaviorLens bridges directly to your ROS 2 stack to visualize execution state.
+- **Live Status Visualization**: See nodes transition (`IDLE`, `RUNNING`, `SUCCESS`, `FAILURE`) as your robot thinks.
+- **Inspection Mode**: One-click subscription to `/behavior_tree_log`.
+  - **Configurable Topic**: You can change the topic in settings if your robot publishes elsewhere.
+  - **Message Type**: Expects `nav2_msgs/msg/BehaviorTreeLog` ([Definition](https://github.com/ros-navigation/navigation2/blob/main/nav2_msgs/msg/BehaviorTreeLog.msg)).
+- **Auto-Discovery**: Automatically detects ROS 2 distributions (Humble, Jazzy) and sources them.
 
-### Prerequisites
+![BehaviorLens ROS 2 Debugging](media/assets/BehaviorLensROS2Debugging.gif)
 
-- [Node.js](https://nodejs.org/) installed.
-- `vsce` (Visual Studio Code Extensions) CLI tool installed:
-  ```bash
-  npm install -g @vscode/vsce
-  ```
+### ⚡ Seamless Synchronization
+- **Bi-directional Sync**: Changes in the visual editor update the XML file instantly, and manual text edits update the visual tree.
+- **Side-by-Side View**: Code on the left, visual tree on the right. Perfect for understanding complex files.
 
-### Publishing Steps
+### 🎨 Beautiful Preview
+- **Node Icons**: Distinct icons for Actions, Conditions, Controls, and Decorators types.
+- **Native Look & Feel**: Matches your VS Code theme (Dark/Light).
 
-1. **Create a Publisher**:
-   - Go to the [Marketplace Management Page](https://marketplace.visualstudio.com/manage).
-   - Log in with your Microsoft account.
-   - Click "Create Publisher" and fill in the details. Note your `publisher ID`.
+## 🚀 Getting Started
 
-2. **Login via CLI**:
-   - Generate a Personal Access Token (PAT) from Azure DevOps (with "Marketplace > Acquire" and "Marketplace > Manage" scopes).
-   - Run:
-     ```bash
-     vsce login <publisher id>
-     ```
+1.  **Install** the extension from the Marketplace.
+2.  Open any `.xml` file containing a Behavior Tree.
+3.  Click the **Open Preview** icon in the editor title bar, or run `BehaviorLens: Open Preview`.
+4.  **Edit**: Drag nodes, click to edit attributes, or use the context menu.
+5.  **Debug**: Use the "Inspect" toggle in the preview to listen to ROS 2 topics.
 
-3. **Package the Extension** (Optional, to create a `.vsix` file):
-   ```bash
-   vsce package
-   ```
+## 🔧 Requirements
 
-4. **Publish to Marketplace**:
-   ```bash
-   vsce publish
-   ```
-   *Note: This will perform a build and upload the extension. You may need to bump the version in `package.json` for subsequent releases.*
+- **VS Code** 1.75.0 or higher.
+- **ROS 2** (Humble, Jazzy, or Iron) is required for **Live Integration** features only.
+  - *Note: Standard visualization and editing works perfectly without ROS.*
+- **Python 3** with `rclpy` (if using ROS bridge).
 
-### Useful Commands
+## ⌨️ Commands
 
-- `npm run compile`: Compiles the TypeScript code.
-- `npm run watch`: Watches for changes and compiles automatically.
-- `npm test`: Runs the test suite.
+| Command | Title | Description |
+| :--- | :--- | :--- |
+| `behaviortree.preview` | **Open Preview** | Opens the visual editor in the current editor group. |
+| `behaviortree.previewSide` | **Open Preview to the Side** | Opens the visual editor in a separate column. |
+
+## 🧩 Advanced Features
+
+### 🔌 Port Visualization
+BehaviorLens automatically visualizes input and output ports for your nodes.
+- **Blackboard Variables**: Easily see which blackboard keys a node reads from or writes to.
+- **Data Flow**: Understand the data dependencies in your behavior tree at a glance.
+
+### 📚 Load Custom Node Libraries
+Work with custom actions and conditions? No problem.
+1.  Open the **Command Palette** (`Ctrl+Shift+P`).
+2.  Run `BehaviorLens: Load Library`.
+3.  Select your XML file containing the node definitions.
+4.  Your custom nodes will appear in the side panel, ready to be dragged into your tree.
+
+## 🤝 Support
+
+If you encounter issues or have feature requests, please [open an issue](https://github.com/yourusername/behavior-lens/issues).
+
+---
+*Built for the Robotics Community.*

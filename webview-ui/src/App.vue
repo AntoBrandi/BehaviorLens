@@ -291,6 +291,51 @@ function getNodeType(tagName: string, hasChildren: boolean): string {
     return 'action';
 }
 
+function reconcilePositions(layoutNodes: any[], oldPositions?: Map<string, {x: number, y: number}>) {
+    layoutNodes.forEach((node: any) => {
+        const uuid = node.data.uuid;
+        const xmlId = node.data.xmlId;
+        const isExpanded = node.data.isExpanded;
+        
+        // 1. If user explicitly moved it, use that position
+        let cachedPos = null;
+        if (isExpanded) {
+             if (userNodePositions.value.has(node.id)) {
+                 cachedPos = userNodePositions.value.get(node.id);
+             }
+        } else {
+            if (uuid && userNodePositions.value.has(uuid)) {
+                 cachedPos = userNodePositions.value.get(uuid);
+            } else if (xmlId && userNodePositions.value.has(xmlId)) {
+                 cachedPos = userNodePositions.value.get(xmlId);
+            }
+        }
+
+        if (cachedPos) {
+             node.position = { ...cachedPos };
+             return;
+        }
+
+        // 2. Fallback to old position (from previous render) if provided
+        if (oldPositions) {
+            if (isExpanded) {
+                if (oldPositions.has(node.id)) {
+                    node.position = oldPositions.get(node.id);
+                    return;
+                }
+            } else {
+                if (uuid && oldPositions.has(uuid)) {
+                     node.position = oldPositions.get(uuid);
+                     return;
+                }
+                if (xmlId && oldPositions.has(xmlId)) {
+                     node.position = oldPositions.get(xmlId);
+                }
+            }
+        }
+    });
+}
+
 function parseXML(text: string) {
     // Capture old positions before parsing
     const oldPositions = new Map<string, {x: number, y: number}>();
@@ -466,49 +511,7 @@ function parseXML(text: string) {
     const layout = getLayoutedElements(newNodes, newEdges, layoutDirection.value);
     
     // Position Reconciliation
-    layout.nodes.forEach((node: any) => {
-        const uuid = node.data.uuid;
-        const xmlId = node.data.xmlId;
-        const isExpanded = node.data.isExpanded;
-        
-        // 1. If user explicitly moved it, use that position
-        
-        let cachedPos = null;
-        if (isExpanded) {
-             // For expanded nodes, ALWAYS use Composite ID (node.id)
-             if (userNodePositions.value.has(node.id)) {
-                 cachedPos = userNodePositions.value.get(node.id);
-             }
-        } else {
-            // For regular nodes, Prefer UUID
-            if (uuid && userNodePositions.value.has(uuid)) {
-                 cachedPos = userNodePositions.value.get(uuid);
-            } else if (xmlId && userNodePositions.value.has(xmlId)) {
-                 cachedPos = userNodePositions.value.get(xmlId);
-            }
-        }
-
-        if (cachedPos) {
-             node.position = cachedPos;
-             return;
-        }
-
-        // 2. Fallback to old position (from previous render)
-        if (isExpanded) {
-            if (oldPositions.has(node.id)) {
-                node.position = oldPositions.get(node.id);
-                return;
-            }
-        } else {
-            if (uuid && oldPositions.has(uuid)) {
-                 node.position = oldPositions.get(uuid);
-                 return;
-            }
-            if (xmlId && oldPositions.has(xmlId)) {
-                 node.position = oldPositions.get(xmlId);
-            }
-        }
-    });
+    reconcilePositions(layout.nodes, oldPositions);
 
     nodes.value = layout.nodes;
     edges.value = layout.edges;
@@ -915,11 +918,16 @@ function getLayoutedElements(nodes: any[], edges: any[], direction = 'TB') {
   const dagreGraph = new dagre.graphlib.Graph();
   dagreGraph.setDefaultEdgeLabel(() => ({}));
   
-  // Set explicit separation to avoid overlap in LR mode
+  // Dynamic separation based on ports visibility
+  // Increase margins significantly when ports are shown to avoid overlap
+  const isPortsVisible = showPorts.value;
+  const rankSep = isPortsVisible ? 90 : 60; 
+  const nodeSep = isPortsVisible ? 70 : 40;
+
   dagreGraph.setGraph({ 
       rankdir: direction,
-      nodesep: 40, // Horizontal separation in TB, Vertical in LR
-      ranksep: 60 // Vertical separation in TB, Horizontal in LR
+      nodesep: nodeSep, 
+      ranksep: rankSep
   });
 
   nodes.forEach((node) => {
@@ -1097,12 +1105,36 @@ function onDrop(event: DragEvent) {
   // So we should keep setting it by ID here as fallback.
 
   // 4. Send to Backend
+  // Calculate attributes from library definition
+  const def = nodeLibrary.value[nodeType] || nodeLibrary.value[nodeType] || undefined;
+  // Note: nodeType here is "Action", "Condition", etc. OR the specific node name if we dragged a specific customized node.
+  // Wait, the sidebar loop uses `nodeId` as the text to drag.
+  // In `onDragStart`, we do: event.dataTransfer.setData('application/vueflow', nodeType); 
+  // where nodeType argument is actually `nodeId` from the v-for.
+  
+  // So `nodeType` variable here holds the Name/ID of the node from the library.
+  
+  const attributes: Record<string, string> = {};
+  if (nodeLibrary.value[nodeType]) {
+      const ports = nodeLibrary.value[nodeType].ports;
+      if (ports) {
+          ports.forEach((p: PortDef) => {
+              if (p.default !== undefined) {
+                  attributes[p.name] = p.default;
+              } else {
+                  attributes[p.name] = ""; // Empty string for no default, forcing it to appear
+              }
+          });
+      }
+  }
+
   vscode.postMessage({
     type: 'add_node',
     nodeType: nodeType,
-    id: id // Pass the ID so backend uses it
+    id: id, // Pass the ID so backend uses it
+    attributes: attributes
   });
-  console.log(`[DnD] Dropped node. Generated ID: ${id}, Position:`, position);
+  console.log(`[DnD] Dropped node. Generated ID: ${id}, Attributes:`, attributes, "Position:", position);
 }
 
 // Toggle Mode
@@ -1165,16 +1197,84 @@ function loadLibrary() {
     vscode.postMessage({ type: 'loadLibrary' });
 }
 
+
+function capturePositions(nodeList: any[]) {
+    const positions = new Map<string, {x: number, y: number}>();
+    nodeList.forEach((n: any) => {
+        if (n.data?.isExpanded) {
+             positions.set(n.id, n.position);
+        } else if (n.data?.uuid) {
+            positions.set(n.data.uuid, n.position);
+        } else if (n.data?.xmlId) {
+            positions.set(n.data.xmlId, n.position);
+        }
+    });
+    return positions;
+}
+
 // Toggle Ports
 function togglePorts() {
-  showPorts.value = !showPorts.value;
+  console.log('[togglePorts] Starting. showPorts:', showPorts.value);
+  // 1. Compute Deltas (Relative positions) before changing anything
+  const nodesClone = nodes.value.map((n: any) => JSON.parse(JSON.stringify(n)));
+  const edgesClone = edges.value.map((e: any) => JSON.parse(JSON.stringify(e)));
   
-  // Re-run layout to account for size changes
+  const currentAutoLayout = getLayoutedElements(nodesClone, edgesClone, layoutDirection.value);
+  
+  const deltas = new Map<string, {dx: number, dy: number}>();
+  
+  nodes.value.forEach((realNode: any) => {
+      const autoNode = currentAutoLayout.nodes.find((n: any) => n.id === realNode.id);
+      if (autoNode) {
+          const dx = realNode.position.x - autoNode.position.x;
+          const dy = realNode.position.y - autoNode.position.y;
+          
+          if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+              deltas.set(realNode.id, { dx, dy });
+              console.log(`[togglePorts] Node ${realNode.id}: Auto=(${autoNode.position.x}, ${autoNode.position.y}), Pinned=(${realNode.position.x}, ${realNode.position.y}), Delta=(${dx}, ${dy})`);
+          }
+      }
+  });
+
+  // 2. Toggle State
+  showPorts.value = !showPorts.value;
+  console.log('[togglePorts] Toggled showPorts to:', showPorts.value);
+  
+  // 3. Run New Layout
   const layout = getLayoutedElements(nodes.value, edges.value, layoutDirection.value);
+  
+  // 4. Apply Deltas
+  layout.nodes.forEach((node: any) => {
+      const delta = deltas.get(node.id);
+      if (delta) {
+          const oldX = node.position.x;
+          const oldY = node.position.y;
+          
+          node.position.x += delta.dx;
+          node.position.y += delta.dy;
+          
+          console.log(`[togglePorts] Node ${node.id}: NewAuto=(${oldX}, ${oldY}), Applied Delta -> Final=(${node.position.x}, ${node.position.y})`);
+          
+          // Update the cache so it sticks
+          const id = node.data?.uuid || node.data?.xmlId || node.id;
+          if (!node.data?.isExpanded) {
+               userNodePositions.value.set(id, { ...node.position });
+          } else {
+               userNodePositions.value.set(node.id, { ...node.position });
+          }
+      } else {
+          // Clear stale
+          const uuid = node.data?.uuid;
+          const xmlId = node.data?.xmlId;
+          
+          if (uuid) userNodePositions.value.delete(uuid);
+          if (xmlId) userNodePositions.value.delete(xmlId);
+          if (node.data?.isExpanded) userNodePositions.value.delete(node.id);
+      }
+  });
+
   nodes.value = [...layout.nodes];
   edges.value = [...layout.edges];
-
-  setTimeout(() => fitView({ padding: 0.2 }), 50);
 }
 
 

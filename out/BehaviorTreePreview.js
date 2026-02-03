@@ -90,7 +90,7 @@ class BehaviorTreePreviewManager {
                     }
                     break;
                 case 'add_node':
-                    this.handleAddNode(uri, message.nodeType, message.id);
+                    this.handleAddNode(uri, message.nodeType, message.id, message.attributes);
                     break;
                 case 'delete_node':
                     this.handleDeleteNode(uri, message.id);
@@ -471,7 +471,7 @@ class BehaviorTreePreviewManager {
             vscode.window.showInformationMessage("Inspection Mode Stopped.");
         }
     }
-    handleAddNode(uri, nodeType, providedId) {
+    handleAddNode(uri, nodeType, providedId, attributes) {
         const doc = this.getDoc(uri);
         if (!doc)
             return;
@@ -483,7 +483,15 @@ class BehaviorTreePreviewManager {
         const id = providedId || `_tmp_${nodeType}_${Date.now()}`;
         const newNode = doc.createElement(nodeType);
         newNode.setAttribute('ID', id); // Standard BT attribute
+        // Add UUID for robustness
+        const uuid = Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
+        newNode.setAttribute('_uuid', uuid);
         // newNode.setAttribute('name', id); // Removed default name attribute as per user request
+        if (attributes) {
+            Object.entries(attributes).forEach(([key, value]) => {
+                newNode.setAttribute(key, value);
+            });
+        }
         // Append to the container
         container.appendChild(newNode);
         // If container is NOT <root>, we are likely appending to BehaviorTree.
@@ -734,7 +742,7 @@ class BehaviorTreePreviewManager {
             return;
         let node = this.findNodeByUuid(doc, nodeId);
         if (!node)
-            node = this.findNodeById(doc, nodeId);
+            node = this.findNodeSmart(doc, nodeId);
         if (node) {
             node.setAttribute(attr, value);
             this.saveXml(uri, doc);
