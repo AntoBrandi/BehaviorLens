@@ -76,7 +76,7 @@ Work with custom actions and conditions? No problem.
 
 ## 🤝 Support
 
-If you encounter issues or have feature requests, please [open an issue](https://github.com/yourusername/behavior-lens/issues).
+If you encounter issues or have feature requests, please [open an issue](https://github.com/AntoBrandi/BehaviorLens/issues).
 
 ---
 *Built for the Robotics Community.*

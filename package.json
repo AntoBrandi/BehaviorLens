@@ -3,7 +3,12 @@
   "displayName": "Behavior Lens",
   "icon": "media/icon.png",
   "description": "Preview for BehaviorTree.CPP XML files",
+  "publisher": "AntoBrandi",
   "version": "0.0.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AntoBrandi/BehaviorLens.git"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
