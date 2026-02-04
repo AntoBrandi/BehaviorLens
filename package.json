@@ -15,7 +15,10 @@
   "categories": [
     "Visualization"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onCommand:behaviortree.preview",
+    "onCommand:behaviortree.previewSide"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -54,14 +57,14 @@
     "glob": "^8.1.0",
     "mocha": "^10.2.0",
     "typescript": "^4.9.5",
-    "vite": "^5.0.0"
-  },
-  "dependencies": {
+    "vite": "^5.0.0",
     "@vue-flow/background": "^1.3.0",
     "@vue-flow/controls": "^1.1.0",
     "@vue-flow/core": "^1.33.0",
     "dagre": "^0.8.5",
-    "vue": "^3.4.0",
+    "vue": "^3.4.0"
+  },
+  "dependencies": {
     "xmldom": "^0.6.0"
   }
 }

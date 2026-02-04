@@ -7,7 +7,7 @@ src/**
 vsc-extension-quickstart.md
 **/*.map
 **/*.ts
-node_modules/**
+!src/ros_bridge.py
 webview-ui/**
 !webview-ui/dist/**
 tsconfig.json
