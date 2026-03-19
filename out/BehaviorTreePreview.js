@@ -62,7 +62,8 @@ class BehaviorTreePreviewManager {
         }
         const panel = vscode.window.createWebviewPanel(BehaviorTreePreviewManager.viewType, `Preview: ${uri.fsPath.replace(/^.*[\\\/]/, '')}`, column, {
             enableScripts: true,
-            localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'media')]
+            localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'media')],
+            retainContextWhenHidden: true
         });
         this._previews.set(uri.toString(), panel);
         panel.onDidDispose(() => {

@@ -51,7 +51,8 @@ export class BehaviorTreePreviewManager {
             column,
             {
                 enableScripts: true,
-                localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'media')]
+                localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'media')],
+                retainContextWhenHidden: true
             }
         );
 
