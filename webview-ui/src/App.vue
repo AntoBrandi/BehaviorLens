@@ -311,6 +311,7 @@ function onSaveLabel(payload: { nodeId: string, newLabel: string }) {
         if (node.data.label !== payload.newLabel) {
             node.data.label = payload.newLabel;
             node.label = payload.newLabel;
+            node.data.attributes = { ...(node.data.attributes || {}), name: payload.newLabel };
             
             vscode.postMessage({
                 type: 'rename_node',
@@ -971,7 +972,7 @@ const dagreGraph = new dagre.graphlib.Graph();
 dagreGraph.setDefaultEdgeLabel(() => ({}));
 
 const nodeWidth = 172;
-const nodeHeight = 36;
+const nodeHeight = 52; // two stacked labels: node type over instance name
 
 // Helper to count visible attributes including library ports
 function countVisiblePorts(node: any) {
@@ -1024,6 +1025,15 @@ function getLayoutedElements(nodes: any[], edges: any[], direction = 'TB') {
   nodes.forEach((node) => {
     let height = nodeHeight;
     let width = nodeWidth;
+
+    // Reserve room for the wider of the two label lines, so dagre spaces nodes
+    // by what they actually render as.
+    const typeLen = String(node.data?.originalName || node.data?.label || '').length;
+    const nameLen = String(node.data?.attributes?.name || node.data?.xmlId || '').length;
+    const labelWidth = Math.max(typeLen * 7.5, nameLen * 6) + 56;
+    if (labelWidth > width) {
+        width = labelWidth;
+    }
 
     if (showPorts.value) {
         const attrCount = countVisiblePorts(node);

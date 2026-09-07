@@ -22,6 +22,31 @@ const isRoot = computed(() => {
     return props.data?.isRoot || props.data?.type === 'root';
 });
 
+/**
+ * The node's class, which for BehaviorTree.CPP is the XML tag
+ * (ReactiveSequence, ClearEntireCostmap, ...). The root node is synthetic and
+ * carries the tree ID in originalName instead, so it gets a fixed label.
+ */
+const nodeTypeLabel = computed(() => {
+    if (isRoot.value) return 'Root';
+    return props.data?.originalName || props.data?.label || '';
+});
+
+/**
+ * The instance name: the 'name' attribute, falling back to a real ID for the
+ * nodes identified that way - SubTree, Groot-style <Action ID="..."/>, and the
+ * root's tree ID. Generated _tmp_ IDs are internal and never shown.
+ */
+const nodeName = computed(() => {
+    const name = props.data?.attributes?.name;
+    if (name) return name;
+
+    const xmlId = props.data?.xmlId;
+    if (xmlId && !String(xmlId).startsWith('_tmp_')) return String(xmlId);
+
+    return '';
+});
+
 const isLeaf = computed(() => {
     const type = (props.data?.type || '').toLowerCase();
     return type === 'action' || type === 'condition' || type === 'subtree';
@@ -113,18 +138,22 @@ const vFocus = {
     
     <div class="node-content">
         <div class="icon" v-html="iconSvg"></div>
-        <div v-if="!isEditing" class="label" @dblclick="!isRoot && $emit('request-edit', id)">{{ data.label }}</div>
-        <input 
-            v-else
-            v-focus
-            class="label-input"
-            type="text"
-            :value="data.label"
-            @blur="onLabelSave"
-            @keydown.enter="onLabelSave"
-            @keydown.escape="onLabelCancel"
-            @mousedown.stop
-        />
+        <div class="labels" @dblclick="!isRoot && $emit('request-edit', id)">
+            <div class="node-type" :title="nodeTypeLabel">{{ nodeTypeLabel }}</div>
+            <input 
+                v-if="isEditing"
+                v-focus
+                class="name-input"
+                type="text"
+                :value="nodeName"
+                placeholder="name"
+                @blur="onLabelSave"
+                @keydown.enter="onLabelSave"
+                @keydown.escape="onLabelCancel"
+                @mousedown.stop
+            />
+            <div v-else-if="nodeName" class="node-name" :title="nodeName">{{ nodeName }}</div>
+        </div>
     </div>
 
     <div class="ports" v-if="showPorts && displayedPorts && displayedPorts.length > 0">
@@ -150,7 +179,7 @@ const vFocus = {
   background: white;
   border: 2px solid #555;
   color: #333;
-  min-width: 120px;
+  min-width: 150px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -172,27 +201,52 @@ const vFocus = {
     justify-content: center;
 }
 
-.label {
+.labels {
     flex: 1;
+    min-width: 0; /* let the children ellipsize instead of stretching the node */
+    /* Height of both lines, so unnamed nodes stay the same size as named ones
+       and sibling rows line up. */
+    min-height: 28px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+}
+
+.node-type {
+    max-width: 100%;
+    font-size: 12px;
     font-weight: 600;
+    line-height: 1.25;
     text-align: center;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
-.label-input {
-    flex: 1;
+.node-name {
+    max-width: 100%;
+    font-size: 10px;
+    font-weight: 400;
+    line-height: 1.2;
+    text-align: center;
+    opacity: 0.7;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.name-input {
+    width: 100%;
     font-family: inherit;
-    font-size: inherit;
-    font-weight: 600;
+    font-size: 10px;
     text-align: center;
     border: 1px solid #2196f3;
     border-radius: 2px;
     padding: 0 4px;
     outline: none;
     background: rgba(255, 255, 255, 0.9);
-    width: 60px; /* Min width */
 }
 
 .handle {
