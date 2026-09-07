@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onErrorCaptured } from 'vue';
+import { ref, computed, onErrorCaptured, onMounted, watch } from 'vue';
 import { VueFlow, useVueFlow, Position } from '@vue-flow/core';
 import { Background } from '@vue-flow/background';
 import { Controls } from '@vue-flow/controls';
@@ -7,19 +7,93 @@ import dagre from 'dagre';
 import CustomNode from './components/CustomNode.vue';
 import ContextMenu from './components/ContextMenu.vue';
 
+// Global VS Code API
+declare const acquireVsCodeApi: any;
+const vscode = acquireVsCodeApi();
+
+/**
+ * Everything the view needs to rebuild itself. VS Code hands this back after
+ * the webview context is torn down (panel hidden) and after a window reload,
+ * so it must stay JSON-serialisable - Maps and Sets go in as entry arrays.
+ */
+interface PersistedState {
+    uri?: string;
+    mode?: 'editor' | 'inspection';
+    layoutDirection?: string;
+    showPorts?: boolean;
+    rosTopic?: string;
+    nodeLibrary?: Record<string, NodeDef>;
+    nodePositions?: [string, { x: number, y: number }][];
+    expandedSubTreeIds?: string[];
+    nodeStatuses?: [string, { status?: string, realStatus?: string }][];
+    viewport?: { x: number, y: number, zoom: number };
+}
+
+const persisted: PersistedState = vscode.getState() || {};
+
+// Consumed once, when the graph is first (re)built after a restore.
+const restoredStatuses = new Map(persisted.nodeStatuses || []);
+const restoredViewport = persisted.viewport;
+
 // State
-const currentMode = ref<'editor' | 'inspection'>('editor');
+const documentUri = ref<string | undefined>(persisted.uri);
+const currentMode = ref<'editor' | 'inspection'>(persisted.mode || 'editor');
 const menu = ref<{ x: number; y: number; type: 'node' | 'edge'; id: string } | null>(null);
-const userNodePositions = ref(new Map<string, {x: number, y: number}>());
-const isFirstLoad = ref(true);
-const layoutDirection = ref('TB');
-const showPorts = ref(false);
+const userNodePositions = ref(new Map<string, {x: number, y: number}>(persisted.nodePositions || []));
+// A restored viewport must not be thrown away by an automatic fitView().
+const isFirstLoad = ref(!restoredViewport);
+const layoutDirection = ref(persisted.layoutDirection || 'TB');
+const showPorts = ref(persisted.showPorts || false);
 const errorLog = ref('');
 const treeDefinitions = ref<Map<string, Element>>(new Map());
 const showExpandMenu = ref(false);
 const subTreeToExpand = ref<string | null>(null);
-const rosTopic = ref('/behavior_tree_log');
-const expandedSubTreeIds = ref(new Set<string>());
+const rosTopic = ref(persisted.rosTopic || '/behavior_tree_log');
+const expandedSubTreeIds = ref(new Set<string>(persisted.expandedSubTreeIds || []));
+
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Debounced, because node drags and status updates fire in bursts. */
+function saveState() {
+    if (saveTimer !== undefined) clearTimeout(saveTimer);
+    saveTimer = setTimeout(writeState, 150);
+}
+
+function writeState() {
+    if (saveTimer !== undefined) {
+        clearTimeout(saveTimer);
+        saveTimer = undefined;
+    }
+
+    const nodeStatuses: [string, { status?: string, realStatus?: string }][] = [];
+    nodes.value.forEach((n: any) => {
+        if (n.data?.status || n.data?.realStatus) {
+            nodeStatuses.push([n.id, { status: n.data.status, realStatus: n.data.realStatus }]);
+        }
+    });
+
+    let viewport = restoredViewport;
+    try {
+        // Throws if the pane has not been initialised yet.
+        viewport = getViewport();
+    } catch (e) {
+        // Keep whatever we restored with rather than dropping it.
+    }
+
+    const state: PersistedState = {
+        uri: documentUri.value,
+        mode: currentMode.value,
+        layoutDirection: layoutDirection.value,
+        showPorts: showPorts.value,
+        rosTopic: rosTopic.value,
+        nodeLibrary: nodeLibrary.value,
+        nodePositions: [...userNodePositions.value.entries()],
+        expandedSubTreeIds: [...expandedSubTreeIds.value],
+        nodeStatuses,
+        viewport
+    };
+    vscode.setState(state);
+}
 
 function updateTopic() {
     vscode.postMessage({
@@ -46,11 +120,16 @@ interface NodeDef {
     ports: PortDef[];
 }
 
-const nodeLibrary = ref<Record<string, NodeDef>>({
+const defaultNodeLibrary: Record<string, NodeDef> = {
     'Sequence': { type: 'Control', ports: [] },
     'Fallback': { type: 'Control', ports: [] },
     'Action': { type: 'Action', ports: [] },
     'Condition': { type: 'Condition', ports: [] }
+};
+
+const nodeLibrary = ref<Record<string, NodeDef>>({
+    ...defaultNodeLibrary,
+    ...(persisted.nodeLibrary || {})
 });
 
 const libraryGroups = computed(() => {
@@ -76,7 +155,7 @@ const libraryGroups = computed(() => {
 });
 
 // Vue Flow
-const { onConnect, addEdges, onNodeDragStop, fitView, setNodes, setEdges, applyNodeChanges, applyEdgeChanges, removeNodes, removeEdges, project } = useVueFlow({
+const { onConnect, addEdges, onNodeDragStop, fitView, setNodes, setEdges, applyNodeChanges, applyEdgeChanges, removeNodes, removeEdges, project, getViewport, setViewport, onPaneReady, onMoveEnd } = useVueFlow({
     minZoom: 0.2,
     maxZoom: 4
 });
@@ -543,6 +622,18 @@ function parseXML(text: string) {
                 }
             }
         }
+    }
+
+    // Re-apply statuses captured before the context was torn down, so an
+    // inspection view does not come back blank while the bridge streams on.
+    if (restoredStatuses.size > 0) {
+        nodes.value.forEach((n: any) => {
+            const saved = restoredStatuses.get(n.id);
+            if (saved) {
+                n.data = { ...n.data, status: saved.status, realStatus: saved.realStatus };
+            }
+        });
+        restoredStatuses.clear();
     }
 }
 
@@ -1178,6 +1269,8 @@ onNodeDragStop((event) => {
             reorderChildren(parentId);
         });
     });
+
+    saveState();
 });
 
 function toggleLayout() {
@@ -1278,10 +1371,6 @@ function togglePorts() {
 }
 
 
-// Global VS Code API
-declare const acquireVsCodeApi: any;
-const vscode = acquireVsCodeApi();
-
 const statusColors: Record<string, string> = {
     'IDLE': '#ffffff',
     'RUNNING': '#ffeb3b',
@@ -1371,18 +1460,62 @@ window.addEventListener('message', event => {
   const message = event.data;
   switch (message.type) {
     case 'update':
+      if (message.uri) documentUri.value = message.uri;
       parseXML(message.text);
+      saveState();
       break;
     case 'status_update': 
       if (currentMode.value === 'inspection') {
         handleStatusUpdate(message.data);
+        saveState();
       }
       break;
     case 'library_loaded':
       parseLibraryXML(message.xml);
       break;
+    case 'inspection_state':
+      // The extension owns the ROS bridge, so it decides whether inspection
+      // mode is real. Restoring it with no bridge behind it would show a view
+      // frozen on statuses that can never update again.
+      if (message.topic) rosTopic.value = message.topic;
+      if (!message.active && currentMode.value === 'inspection') {
+        currentMode.value = 'editor';
+        nodes.value.forEach((node: any) => {
+          if (node.data) {
+            node.data = { ...node.data, status: undefined, realStatus: undefined };
+          }
+        });
+      }
+      saveState();
+      break;
   }
 });
+
+onPaneReady(() => {
+    if (restoredViewport) {
+        setViewport(restoredViewport).catch(() => { /* pane went away */ });
+    }
+});
+
+onMoveEnd(() => saveState());
+
+// A torn-down context never runs a pending timer, so flush the debounce before
+// the panel goes away - otherwise a pan or drag made in the last 150ms is lost.
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) writeState();
+});
+window.addEventListener('pagehide', () => writeState());
+
+// The extension holds off sending anything until this arrives: a message
+// posted before the listener above is attached would be dropped.
+onMounted(() => {
+    vscode.postMessage({ type: 'ready' });
+});
+
+// Node positions and statuses are saved from their own handlers, since deep
+// watching the whole graph on every drag frame is needlessly expensive.
+watch([documentUri, currentMode, layoutDirection, showPorts, rosTopic], () => saveState());
+watch([nodeLibrary, userNodePositions, expandedSubTreeIds], () => saveState(), { deep: true });
 
 
 function onUpdateAttribute(payload: any) {
@@ -1450,7 +1583,7 @@ function onUpdateAttribute(payload: any) {
           <VueFlow 
             v-model:nodes="nodes" 
             v-model:edges="edges" 
-            :fit-view-on-init="true"
+            :fit-view-on-init="!restoredViewport"
             :delete-key-code="currentMode === 'editor' ? ['Backspace', 'Delete'] : []"
             @nodes-change="onNodesChange"
             @edges-change="onEdgesChange"

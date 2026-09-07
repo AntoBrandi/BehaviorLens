@@ -17,7 +17,8 @@
   ],
   "activationEvents": [
     "onCommand:behaviortree.preview",
-    "onCommand:behaviortree.previewSide"
+    "onCommand:behaviortree.previewSide",
+    "onWebviewPanel:behaviortree.preview"
   ],
   "main": "./out/extension.js",
   "contributes": {

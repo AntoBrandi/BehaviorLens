@@ -40,6 +40,14 @@ class BehaviorTreePreviewManager {
         this._extensionUri = _extensionUri;
         this._previews = new Map();
         this._cachedDocs = new Map();
+        /**
+         * Panels whose webview has announced itself with 'ready'. A hidden panel's
+         * webview context is torn down, so anything posted to it before the bundle
+         * has re-run and re-attached its message listener is silently dropped.
+         */
+        this._readyPanels = new Set();
+        /** Last library loaded per document, so it can be replayed on reload. */
+        this._libraries = new Map();
         this._currentTopic = '/behavior_tree_log';
         // Update all active previews when the document changes
         vscode.workspace.onDidChangeTextDocument(e => {
@@ -52,7 +60,8 @@ class BehaviorTreePreviewManager {
         });
     }
     async showPreview(uri, side) {
-        const document = await vscode.workspace.openTextDocument(uri);
+        // Opening the document keeps onDidChangeTextDocument firing for it.
+        await vscode.workspace.openTextDocument(uri);
         const column = side ? vscode.ViewColumn.Beside : vscode.ViewColumn.One;
         // If we already have a panel, show it
         if (this._previews.has(uri.toString())) {
@@ -60,23 +69,52 @@ class BehaviorTreePreviewManager {
             panel.reveal(column);
             return;
         }
-        const panel = vscode.window.createWebviewPanel(BehaviorTreePreviewManager.viewType, `Preview: ${uri.fsPath.replace(/^.*[\\\/]/, '')}`, column, {
+        const panel = vscode.window.createWebviewPanel(BehaviorTreePreviewManager.viewType, `Preview: ${uri.fsPath.replace(/^.*[\\\/]/, '')}`, column, this.getWebviewOptions());
+        this.attachPanel(panel, uri);
+    }
+    /**
+     * Re-adopt a panel that VS Code restored after a window reload. The URI
+     * comes from the state the webview persisted with setState().
+     */
+    async restorePanel(panel, uri) {
+        // Open the document so onDidChangeTextDocument keeps firing for it.
+        await vscode.workspace.openTextDocument(uri);
+        this.attachPanel(panel, uri);
+    }
+    getWebviewOptions() {
+        return {
             enableScripts: true,
             localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'media')]
-        });
-        this._previews.set(uri.toString(), panel);
-        panel.onDidDispose(() => {
-            this._previews.delete(uri.toString());
-            this._cachedDocs.delete(uri.toString());
-        });
+        };
+    }
+    /**
+     * Wires up a panel, whether freshly created or restored by VS Code. No
+     * state is pushed from here: the webview drives the initial sync by
+     * posting 'ready' once its listener is attached.
+     */
+    attachPanel(panel, uri) {
+        const uriStr = uri.toString();
+        // Restored panels come back without options, so always (re)apply them.
+        panel.webview.options = this.getWebviewOptions();
+        this._previews.set(uriStr, panel);
         panel.onDidChangeViewState(() => {
-            if (panel.visible) {
-                this.updateWebview(panel, document);
+            if (!panel.visible) {
+                // The context is being discarded; the reloaded bundle will
+                // post 'ready' again when the panel is shown next.
+                this._readyPanels.delete(panel);
+                return;
+            }
+            if (this._readyPanels.has(panel)) {
+                // Still listening, so the context survived being hidden and no
+                // 'ready' is coming. Catch up on edits made while hidden.
+                vscode.workspace.openTextDocument(uri).then(document => this.updateWebview(panel, document), err => console.warn('[BehaviorTreePreview] Could not reopen document', err));
             }
         });
-        panel.webview.html = this.getHtmlForWebview(panel.webview);
         panel.webview.onDidReceiveMessage(message => {
             switch (message.type) {
+                case 'ready':
+                    this.handleReady(panel, uri).catch(err => vscode.window.showErrorMessage(`Failed to load preview: ${err.message}`));
+                    break;
                 case 'editAttribute':
                     this.handleEditAttribute(uri, message.nodeId, message.attr, message.value);
                     break;
@@ -116,13 +154,44 @@ class BehaviorTreePreviewManager {
                     break;
             }
         });
-        // Initial update
-        this.updateWebview(panel, document);
-        // Cleanup on dispose
         panel.onDidDispose(() => {
             this.stopInspectionMode();
-            this._previews.delete(uri.toString());
+            this._previews.delete(uriStr);
+            this._cachedDocs.delete(uriStr);
+            this._libraries.delete(uriStr);
+            this._readyPanels.delete(panel);
         });
+        panel.webview.html = this.getHtmlForWebview(panel.webview);
+    }
+    /**
+     * The webview is listening. Push everything it needs to rebuild itself:
+     * it starts from an empty graph every time its context is recreated.
+     */
+    async handleReady(panel, uri) {
+        this._readyPanels.add(panel);
+        const document = await vscode.workspace.openTextDocument(uri);
+        this.updateWebview(panel, document);
+        const library = this._libraries.get(uri.toString());
+        if (library) {
+            this.post(panel, { type: 'library_loaded', xml: library });
+        }
+        // The extension is authoritative about the bridge. Without this a
+        // webview that restored 'inspection' mode would sit there waiting for
+        // updates from a process that is no longer running.
+        this.post(panel, {
+            type: 'inspection_state',
+            active: this._bridgeProcess !== undefined,
+            topic: this._currentTopic
+        });
+    }
+    /**
+     * Posts to a webview only if it is listening. Nothing is queued: whatever
+     * is dropped here is re-sent in full by handleReady().
+     */
+    post(panel, message) {
+        if (this._readyPanels.has(panel)) {
+            panel.webview.postMessage(message);
+        }
     }
     findNodeSmart(doc, id) {
         // 1. Try Path-based resolution (Composite ID: "XMLID#Path")
@@ -407,7 +476,7 @@ class BehaviorTreePreviewManager {
                     if (trimmed.startsWith('{')) {
                         try {
                             const json = JSON.parse(trimmed);
-                            panel.webview.postMessage({
+                            this.post(panel, {
                                 type: 'status_update',
                                 data: json
                             });
@@ -592,8 +661,9 @@ class BehaviorTreePreviewManager {
         // We need to process includes as well
         // Serialize first? processXmlWithDoc expects doc, but it will clone it.
         const processedDoc = this.processXmlWithDoc(doc, path.dirname(uri.fsPath));
-        p.webview.postMessage({
+        this.post(p, {
             type: 'update',
+            uri: uri.toString(),
             text: new xmldom_1.XMLSerializer().serializeToString(processedDoc),
         });
     }
@@ -839,7 +909,11 @@ class BehaviorTreePreviewManager {
             const uri = uris[0];
             try {
                 const content = fs.readFileSync(uri.fsPath, 'utf8');
-                panel.webview.postMessage({
+                const previewUri = this.uriForPanel(panel);
+                if (previewUri) {
+                    this._libraries.set(previewUri, content);
+                }
+                this.post(panel, {
                     type: 'library_loaded',
                     xml: content
                 });
@@ -849,6 +923,14 @@ class BehaviorTreePreviewManager {
                 vscode.window.showErrorMessage(`Failed to load library: ${e.message}`);
             }
         }
+    }
+    /** The document a panel is previewing, for callbacks that only have the panel. */
+    uriForPanel(panel) {
+        for (const [uriStr, p] of this._previews) {
+            if (p === panel)
+                return uriStr;
+        }
+        return undefined;
     }
     getHtmlForWebview(webview) {
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'assets', 'index.js'));
